@@ -4,6 +4,7 @@ pub mod domain;
 pub mod error;
 pub mod ports;
 
+pub use adapters::builtin::BuiltinToolClient;
 pub use adapters::fuzzy_patch::FuzzyPatcher;
 pub use adapters::mcp_stdio::McpStdioClient;
 pub use adapters::openai::OpenAiProvider;

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::warn;
 
+use crate::adapters::builtin::BuiltinToolClient;
 use crate::adapters::mcp_stdio::McpStdioClient;
 use crate::domain::manifest::AppManifest;
 use crate::ports::llm::{ChatMessage, LlmProvider, ToolDefinition};
@@ -21,10 +22,17 @@ impl<P: LlmProvider> DustCore<P> {
     /// Creates a new `DustCore` instance with a loaded manifest and LLM provider.
     pub fn new(manifest: AppManifest, provider: P) -> Self {
         let max_turns = manifest.max_turns.unwrap_or(10);
+        // Built-in tools are always available under the `builtin` namespace —
+        // no manifest declaration required, zero subprocess overhead.
+        let mut mcp_clients: HashMap<String, Box<dyn McpClient>> = HashMap::new();
+        mcp_clients.insert(
+            "builtin".to_string(),
+            Box::new(BuiltinToolClient::new()),
+        );
         Self {
             manifest,
             provider,
-            mcp_clients: HashMap::new(),
+            mcp_clients,
             max_turns,
         }
     }
