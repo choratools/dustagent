@@ -26,7 +26,7 @@ impl<P: LlmProvider> DustCore<P> {
         // no manifest declaration required, zero subprocess overhead.
         let mut mcp_clients: HashMap<String, Box<dyn McpClient>> = HashMap::new();
         mcp_clients.insert(
-            "builtin".to_string(),
+            "dustagent".to_string(),
             Box::new(BuiltinToolClient::new()),
         );
         Self {
