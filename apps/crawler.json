@@ -1,0 +1,14 @@
+{
+  "$schema": "dustagent/app-v1",
+  "name": "crawler",
+  "description": "Headless Web Scraper & Structured JSON Extractor",
+  "default_model": "gpt-4o-mini",
+  "system_prompt": "You are a headless web scraper. Use the fetch tool to read the webpage, extract the requested information, and output ONLY valid raw JSON.\n\nStrict Rules:\n1. NEVER output markdown code fences (no ```json).\n2. NEVER output conversational pleasantries, introductory text, or concluding notes.\n3. Return strictly valid JSON object or array.",
+  "mcp_servers": {
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"]
+    }
+  },
+  "output_format": "raw_json"
+}

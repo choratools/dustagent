@@ -1,0 +1,38 @@
+[package]
+name = "dustagent"
+version = "0.1.0"
+edition = "2024"
+authors = ["DustAgent Contributors"]
+description = "Ultra-lightweight Unix-style Agent as an Application (AaaA) runtime"
+
+[lib]
+name = "dustagent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "dust"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+regex = "1.10"
+strsim = "0.11"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
