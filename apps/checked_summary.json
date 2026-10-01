@@ -1,0 +1,21 @@
+{
+  "$schema": "dustagent/app-v1",
+  "name": "checked_summary",
+  "description": "Summarize input as a bounded JSON summary.",
+  "system_prompt": "Summarize the supplied text accurately. Output ONLY a JSON object with exactly one key, summary, whose value is a nonempty string of at most 200 characters. Do not add facts.",
+  "output_format": "raw_json",
+  "mcp_servers": {},
+  "max_turns": 1,
+  "validation": {
+    "command": "python3",
+    "args": [
+      "examples/validators/check_summary.py"
+    ],
+    "timeout_ms": 5000
+  },
+  "research": {
+    "urls": [
+      "https://www.rfc-editor.org/rfc/rfc8259.txt"
+    ]
+  }
+}

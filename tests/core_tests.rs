@@ -165,6 +165,8 @@ async fn test_single_shot_execution_without_tools() {
         mcp_servers: HashMap::new(),
         output_format: Some("text".to_string()),
         max_turns: None,
+        validation: None,
+        research: None,
     };
 
     let expected_output = "The quick brown fox jumps over the lazy dog.";
@@ -190,7 +192,14 @@ async fn test_single_shot_execution_without_tools() {
         ChatMessage::system("You are a concise summarizer.")
     );
     assert_eq!(recorded.messages[1], ChatMessage::user(user_input));
-    assert!(recorded.tools.is_none() || recorded.tools.as_ref().unwrap().is_empty());
+    assert!(
+        recorded
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|t| t.name == "dustagent__sleep")
+    );
 
     core.shutdown().await.expect("Shutdown should succeed");
 }
@@ -206,6 +215,8 @@ async fn test_multiturn_tool_execution() {
         mcp_servers: HashMap::new(),
         output_format: Some("raw_json".to_string()),
         max_turns: None,
+        validation: None,
+        research: None,
     };
 
     // Prepare mock MCP client exposing "fetch" tool
@@ -261,8 +272,7 @@ async fn test_multiturn_tool_execution() {
     // Turn 1 should have tools available
     assert!(calls[0].tools.is_some());
     let tools = calls[0].tools.as_ref().unwrap();
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name, "fetcher__fetch");
+    assert!(tools.iter().any(|t| t.name == "fetcher__fetch"));
 
     // Turn 2 messages should include assistant tool call & tool result
     let turn2_messages = &calls[1].messages;
@@ -319,6 +329,8 @@ async fn test_tool_execution_error_handling() {
         mcp_servers: HashMap::new(),
         output_format: None,
         max_turns: None,
+        validation: None,
+        research: None,
     };
 
     // Tool call for non-existent server
@@ -359,6 +371,8 @@ async fn test_max_turns_limit() {
         mcp_servers: HashMap::new(),
         output_format: None,
         max_turns: None,
+        validation: None,
+        research: None,
     };
 
     // Infinite tool calling loop
@@ -386,4 +400,61 @@ fn test_mcp_server_config_creation() {
     let config = McpServerConfig::new("uvx").with_args(["mcp-server-fetch".to_string()]);
     assert_eq!(config.command, "uvx");
     assert_eq!(config.args, vec!["mcp-server-fetch"]);
+}
+
+#[tokio::test]
+async fn experience_requires_approval_and_injects_history_without_changing_prompt() {
+    use dustagent::application::ExperienceStore;
+    let dir = tempfile::tempdir().unwrap();
+    let store = ExperienceStore::new(dir.path());
+    let manifest = AppManifest::new()
+        .with_name("review")
+        .with_system_prompt("Review only.");
+    let provider = MockLlmProvider::with_responses([
+        LlmResponse::text("verified result"),
+        LlmResponse::text("second result"),
+        LlmResponse::text("third result"),
+    ]);
+    let mut core = DustCore::new(manifest.clone(), provider.clone());
+    core.execute_with_experience("Rust error", &store)
+        .await
+        .unwrap();
+    core.execute_with_experience("Rust error again", &store)
+        .await
+        .unwrap();
+    assert_eq!(provider.last_call().unwrap().messages.len(), 2);
+    let records = store.list(&manifest).unwrap();
+    assert!(records.iter().all(|e| !e.approved));
+    store.approve(&manifest, &records[0].id, true).unwrap();
+    core.execute_with_experience("Rust error new", &store)
+        .await
+        .unwrap();
+    let messages = provider.last_call().unwrap().messages;
+    assert_eq!(messages[0], ChatMessage::system("Review only."));
+    assert_eq!(messages[2], ChatMessage::user("Rust error"));
+    assert_eq!(messages[3], ChatMessage::assistant_text("verified result"));
+    assert_eq!(messages[4], ChatMessage::user("Rust error new"));
+}
+
+#[tokio::test]
+async fn failed_tools_and_turn_exhaustion_are_not_curatable() {
+    use dustagent::application::ExperienceStore;
+    let dir = tempfile::tempdir().unwrap();
+    let store = ExperienceStore::new(dir.path());
+    let manifest = AppManifest::new().with_name("failure");
+    let provider = MockLlmProvider::with_responses([
+        LlmResponse::tool_calls(vec![ToolCall::new("id", "missing__tool", "{}")]),
+        LlmResponse::text("Looks successful"),
+    ]);
+    let mut core = DustCore::new(manifest.clone(), provider);
+    core.execute_with_experience("Rust", &store).await.unwrap();
+    let records = store.list(&manifest).unwrap();
+    assert!(!records[0].completed);
+    assert!(store.approve(&manifest, &records[0].id, true).is_err());
+    let mut core = DustCore::new(manifest.clone(), MockLlmProvider::new()).with_max_turns(0);
+    assert_eq!(
+        core.execute_with_experience("Rust", &store).await.unwrap(),
+        ""
+    );
+    assert!(store.list(&manifest).unwrap().iter().all(|e| !e.completed));
 }

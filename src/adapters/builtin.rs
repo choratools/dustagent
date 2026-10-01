@@ -148,9 +148,9 @@ impl McpClient for BuiltinToolClient {
             }
 
             "env_get" => {
-                let var_name = arguments["name"]
-                    .as_str()
-                    .ok_or_else(|| DustError::Mcp("builtin::env_get requires `name` (str)".into()))?;
+                let var_name = arguments["name"].as_str().ok_or_else(|| {
+                    DustError::Mcp("builtin::env_get requires `name` (str)".into())
+                })?;
                 let value = std::env::var(var_name).ok();
                 Ok(json!({ "name": var_name, "value": value }))
             }
@@ -163,9 +163,7 @@ impl McpClient for BuiltinToolClient {
                 Ok(json!({ "sha256": digest, "input_len": input.len() }))
             }
 
-            other => Err(DustError::Mcp(format!(
-                "Unknown built-in tool: '{other}'"
-            ))),
+            other => Err(DustError::Mcp(format!("Unknown built-in tool: '{other}'"))),
         }
     }
 
@@ -198,7 +196,20 @@ fn epoch_to_iso8601(secs: u64) -> String {
         days -= days_in_year;
         year += 1;
     }
-    let months = [31u64, if is_leap(year) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let months = [
+        31u64,
+        if is_leap(year) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 1u64;
     for &m in &months {
         if days < m {
@@ -212,7 +223,7 @@ fn epoch_to_iso8601(secs: u64) -> String {
 }
 
 fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 /// Minimal SHA-256 — uses `sha2` if available, otherwise a pure-Rust fallback.
@@ -234,7 +245,10 @@ mod tests {
     #[tokio::test]
     async fn test_sleep_short() {
         let mut client = BuiltinToolClient::new();
-        let res = client.call_tool("sleep", json!({ "ms": 50 })).await.unwrap();
+        let res = client
+            .call_tool("sleep", json!({ "ms": 50 }))
+            .await
+            .unwrap();
         assert_eq!(res["slept_ms"], 50);
         assert_eq!(res["status"], "ok");
     }
@@ -262,21 +276,30 @@ mod tests {
         // SAFETY: test-only, single-threaded test context
         unsafe { std::env::set_var("DUST_TEST_VAR", "hello") };
         let mut client = BuiltinToolClient::new();
-        let res = client.call_tool("env_get", json!({ "name": "DUST_TEST_VAR" })).await.unwrap();
+        let res = client
+            .call_tool("env_get", json!({ "name": "DUST_TEST_VAR" }))
+            .await
+            .unwrap();
         assert_eq!(res["value"], "hello");
     }
 
     #[tokio::test]
     async fn test_env_get_missing() {
         let mut client = BuiltinToolClient::new();
-        let res = client.call_tool("env_get", json!({ "name": "DUST_NONEXISTENT_ZZZ" })).await.unwrap();
+        let res = client
+            .call_tool("env_get", json!({ "name": "DUST_NONEXISTENT_ZZZ" }))
+            .await
+            .unwrap();
         assert!(res["value"].is_null());
     }
 
     #[tokio::test]
     async fn test_hash_known_value() {
         let mut client = BuiltinToolClient::new();
-        let res = client.call_tool("hash", json!({ "input": "hello" })).await.unwrap();
+        let res = client
+            .call_tool("hash", json!({ "input": "hello" }))
+            .await
+            .unwrap();
         // SHA-256 of "hello"
         assert_eq!(
             res["sha256"].as_str().unwrap(),

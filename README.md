@@ -1,196 +1,188 @@
 # DustAgent
 
-> **The smallest agent runtime that actually works.**
+**Small, focused agents your agent can call.**
 
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://www.rust-lang.org)
 
----
+> 직접 `dust`를 쓰려고요? Agent한테 시키세요.
+> Let your agent create, run, and improve the agents it needs.
 
-## ⚠️ Wait — Don't use `dust` directly.
+DustAgent is a Rust runtime for **Agent as an Application (AaaA)**. Each application is a JSON manifest with a focused prompt and its own MCP servers. It accepts a task, calls an OpenAI-compatible model, runs tool calls when needed, and returns the result.
 
-**Let an agent do it.**
+Your coding agent or automation owns the larger task. DustAgent supplies focused workers: generate a commit message, extract data, diagnose an error, or produce a patch. With experience enabled, it also records runs, investigates relevant documentation, and selects examples to reuse.
 
-Seriously. The whole point of DustAgent is that _you_ don't interact with it.
-Agents call agents. Pipelines call agents. CI calls agents. You don't.
+## Ask your agent
 
-```bash
-# ❌ Wrong mental model: you, typing, waiting, reading
-dust run crawler "https://news.ycombinator.com"
+Give your existing coding agent a task like this:
 
-# ✅ Right mental model: an orchestrator agent invoking a scoped subagent
-dust run researcher "summarize trending Rust crates" \
-  | dust run patcher -f README.md "update the Ecosystem section"
-```
+> Use DustAgent to create an agent that summarizes text as JSON. Run it on my input, inspect the result, and enable experience so later runs can reuse useful examples. Add a checker for the output contract and let `dust learn` investigate the recorded results.
 
-If you're tempted to stare at the output and manually do something with it —
-**you're still in the loop**. Build an agent that does that next step instead.
+The commands below are the interface that agent uses. There are no interactive confirmation prompts in the CLI.
 
----
-
-## What is DustAgent?
-
-DustAgent is an **Agent-as-an-Application (AaaA)** runtime. It turns a 10-line JSON manifest into a fully functional, single-purpose AI agent that reads from `STDIN`, thinks, and writes to `STDOUT`. No conversation. No confirmation prompts. No runtime bloat.
-
-The core is a ~300-line Rust micro-kernel. It handles LLM streaming, scoped stdio MCP tool management, and atomic fuzzy search/replace patching. Everything else lives in declarative `apps/*.json` manifests — one file per agent, swappable at runtime without recompilation.
-
-The key insight: an LLM doesn't need a framework. It needs a sharp prompt, exactly the right tools (and _nothing else_), and a reliable patch engine. That's it.
-
----
-
-## Quickstart
-
-### Prerequisites
+## Install and connect a model
 
 ```bash
 git clone https://github.com/choratools/dustagent.git
 cd dustagent
-cargo install --path .
+cargo install --path . --locked
 
-export OPENAI_API_KEY="sk-..."          # or any OpenAI-compatible endpoint
-# export OPENAI_BASE_URL="http://localhost:30000/v1"  # for local vLLM/SGLang
+export OPENAI_API_KEY="your-api-key"
+# For another OpenAI-compatible server:
+# export OPENAI_BASE_URL="http://localhost:30000/v1"
 ```
 
-### 1. Create an agent (let AI design it)
+`OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`. The adapter requires `OPENAI_API_KEY`, including for local servers; use a placeholder only if your local server accepts one. Use `--model` to select the model served by your endpoint. `run` and `learn` otherwise use the app's `default_model`, falling back to `gpt-4o-mini`; `new` defaults to `gpt-4o-mini`.
+
+Run examples from the repository root so the bundled `apps/` manifests and checker paths resolve. External MCP tools require their declared commands, such as `uvx` or `npx`, to be installed separately.
+
+## Create, run, compose
 
 ```bash
-dust new crawler "Extract structured data from URLs as JSON"
-```
+# Generate apps/summarizer.json from a task description.
+dust new summarizer "Summarize input as JSON with one summary field"
 
-This scaffolds `apps/crawler.json` — a complete agent manifest. The scaffold agent writes the system prompt, selects appropriate MCP tools, and sets the output schema. You don't write any code.
+# Inspect the generated manifest on stdout instead of saving it.
+dust new reviewer "Review a diff and return JSON comments" --stdout
 
-### 2. Run it
-
-```bash
-dust run crawler "https://news.ycombinator.com"
-```
-
-Output is pure JSON on `STDOUT`. Exit code `0` on success. Nothing else.
-
-### 3. Chain agents
-
-```bash
-# Feed a list of URLs through crawler, then summarize each result
-cat urls.txt | dust run crawler | dust run summarizer
-
-# Generate a commit message straight from staged diff
+# Run an app with an argument or piped input.
+dust run summarizer "The text to summarize"
 git diff --cached | dust run commit_gen
 
-# Pipe compiler errors into an auto-patcher
-cargo check 2>&1 | dust run diagnostician | dust patch -f src/lib.rs "fix reported error"
+# Compose workers using ordinary pipes.
+git diff --cached | dust run commit_gen | dust run summarizer
 ```
 
-Agents are Unix filters. Compose them with `|`, `xargs`, `while read`, or any shell primitive.
+Place options before the input text, for example `dust run summarizer --model MODEL "input"`. You can also pass a manifest path instead of an app name.
 
----
+`dust new` generates a manifest using the scaffold prompt; the calling agent should inspect the generated prompt and tool declarations before running it. App names resolve against the current directory and its `apps/` directory.
 
-## Built-in Tools (always available)
+`dust run` writes the model's final response to STDOUT and diagnostics to STDERR. The app prompt determines whether that response is text, JSON, or patch blocks. An `output_format` declaration guides use and reinforcement checks; it does not enforce a response schema during ordinary execution. Reaching the turn limit can return an empty response, so callers should check the result as well as the exit code.
 
-Every agent gets these five native Rust tools at zero cost — no subprocess, no MCP server spawn:
+## Improve from experience
 
-| Tool | Signature | Description |
-| :--- | :--- | :--- |
-| `dustagent__sleep` | `(ms: u64)` | Async non-blocking delay up to 300s |
-| `dustagent__timestamp` | `(format?: "unix_ms"\|"iso8601"\|"both")` | Current UTC time |
-| `dustagent__uuid` | `()` | Random UUID v4 |
-| `dustagent__env_get` | `(name: string)` | Read an environment variable |
-| `dustagent__hash` | `(input: string)` | SHA-256 hex digest |
+```bash
+# Record this run and review earlier pending examples before executing.
+dust run summarizer --experience "The text to summarize"
 
-External MCP servers (`mcp-server-fetch`, `mcp-server-postgres`, Playwright, etc.) are declared per-app in the manifest and launched on-demand as stdio subprocesses.
+# Investigate pending records and persist reuse decisions.
+dust learn summarizer
 
----
-
-## Architecture
-
-```mermaid
-flowchart LR
-    subgraph Input ["Standard Input"]
-        STDIN["STDIN / CLI Prompt"]
-    end
-
-    subgraph Kernel ["DustAgent Micro-Kernel (< 5MB Rust)"]
-        PARSE["Manifest Loader"]
-        MCP["Scoped stdio MCP Manager"]
-        LLM["OpenAI-Compatible LLM Gateway"]
-        PATCH["Atomic Fuzzy Search/Replace Engine"]
-
-        PARSE --> MCP
-        MCP <--> LLM
-        LLM --> PATCH
-    end
-
-    subgraph Apps ["AaaA Apps (apps/*.json)"]
-        A1["crawler"]
-        A2["commit_gen"]
-        A3["patcher"]
-        A4["diagnostician"]
-    end
-
-    subgraph Output ["Standard Output"]
-        STDOUT["STDOUT (Pure JSON / Diff / Text)"]
-    end
-
-    STDIN --> PARSE
-    Apps -.-> PARSE
-    PATCH --> STDOUT
+# Inspect results, checker evidence, sources, and decision reasons.
+dust learn summarizer --list
 ```
 
-**Key property: MCP scope isolation.** When `dust run crawler` executes, only the `fetch` MCP server exists in the model's context. The filesystem tool, the git tool, the database tool — they don't appear. The model cannot hallucinate calls to tools that aren't there. Side effects are architecturally impossible, not just discouraged.
+No run IDs or individual approval commands are needed. The reinforcement flow is:
 
----
+```text
+Recorded input/output
+  → output-format check
+  → configured local checker, if present
+  → relevant documentation lookup
+  → model review with the collected evidence
+  → persist selection and reason
+  → reuse related examples in later runs
+```
 
-## App Manifest Schema
+The CLI proposes up to two official documentation URLs per reviewed example and fetches their content. Set `research.urls` in the manifest to use fixed sources instead. This is URL discovery and document retrieval, rather than search-engine integration. Failed retrievals are recorded as failures, not source evidence.
 
-Every agent is a single JSON file in `apps/`:
+Review processes at most ten pending completed examples per invocation. Selected examples are matched by word overlap; at most three examples and 8 KiB of their combined input/output enter the next task's context. The app prompt and tool declarations remain in place. Model weights are not changed.
+
+Recording is opt-in. Both `run` and `learn` accept `--experience-dir PATH`; on `run`, that option also enables experience. The default store is `~/.dustagent/experiences/`. Records are scoped by the full manifest: changing the prompt, tools, checker, or research settings starts a separate set of examples and preserves the old files.
+
+Records include task inputs and outputs. Review sends those records and collected evidence to the configured model API and can make additional HTTP requests. A selected example is useful reference material, not proof of correctness. Checker success establishes only what the checker tested; document excerpts establish only what was actually fetched.
+
+### Add an actual checker
+
+An app can include these fields:
+
+```json
+{
+  "validation": {
+    "command": "python3",
+    "args": ["examples/validators/check_summary.py"],
+    "timeout_ms": 5000
+  },
+  "research": {
+    "urls": ["https://www.rfc-editor.org/rfc/rfc8259.txt"]
+  }
+}
+```
+
+The fixed command receives `{ "input": "...", "output": "..." }` as JSON on STDIN. It must exit `0` and return a JSON verdict on STDOUT:
+
+```json
+{"passed": true, "reason": "Checked the summary key and 200-character bound"}
+```
+
+Failed checks prevent selection. Commands run in the current directory with the current environment; the model does not choose or modify them. A test command such as `cargo test` needs a wrapper that converts its actual result into this verdict format. Timeout defaults to five seconds and supports up to sixty seconds; stdout and stderr are limited to 8 KiB each.
+
+Try the bundled example:
+
+```bash
+dust run checked_summary --experience "DustAgent runs focused agents from JSON manifests."
+dust learn checked_summary
+dust learn checked_summary --list
+```
+
+Its checker validates the JSON shape and summary length, not factual accuracy. See [the experience guide](docs/11_경험_기반_자기강화.md) for storage limits, source retrieval, and the library interfaces. [reinforcer](apps/reinforcer.json) exposes the review prompt as a separate app; the CLI connects the actual checks, retrieval, and persistence.
+
+## App manifests and scoped tools
 
 ```json
 {
   "$schema": "dustagent/app-v1",
   "name": "crawler",
-  "description": "Extract structured data from a URL as clean JSON",
+  "description": "Extract structured data from a URL",
+  "system_prompt": "Fetch the supplied URL and return extracted data as JSON only.",
   "default_model": "gpt-4o-mini",
-  "system_prompt": "You are a headless web extractor. Fetch the given URL and output clean JSON only. No conversational text. No markdown fences. Pure JSON.",
   "mcp_servers": {
     "fetch": {
       "command": "uvx",
       "args": ["mcp-server-fetch"]
     }
   },
+  "max_turns": 10,
   "output_format": "raw_json"
 }
 ```
 
-| Field | Type | Required | Description |
-| :--- | :--- | :---: | :--- |
-| `$schema` | `string` | ✓ | Always `"dustagent/app-v1"` |
-| `name` | `string` | ✓ | App identifier (used in `dust run <name>`) |
-| `description` | `string` | ✓ | One-line human description (also used by scaffold agent) |
-| `system_prompt` | `string` | ✓ | The agent's full operating instructions |
-| `default_model` | `string` | — | LLM model override (defaults to env `DUST_MODEL`) |
-| `mcp_servers` | `object` | — | Map of MCP server name → `{command, args, env?}` |
-| `output_format` | `string` | — | `"text"` (default) \| `"raw_json"` \| `"diff"` |
+`name`, `description`, and `system_prompt` describe the app; `$schema` is a convention marker. The runtime accepts these as optional fields. `mcp_servers` defaults to an empty map, and `max_turns` defaults to ten. Common output formats are `text`, `raw_json`, and `search_replace_patch`.
 
-No code. No compilation. Drop the file, run the agent.
+Only the app's declared external MCP servers are started. Their tools are named `{server}__{tool}`. Native tools are also available on every app, with no separate MCP process:
 
----
+| Tool | Arguments | Purpose |
+| :--- | :--- | :--- |
+| `dustagent__sleep` | `ms` | Async delay in milliseconds |
+| `dustagent__timestamp` | Optional `format`: `unix_ms`, `iso8601`, or `both` | Current UTC time |
+| `dustagent__uuid` | None | Generate a UUID v4 |
+| `dustagent__env_get` | `name` | Read an environment variable |
+| `dustagent__hash` | `input` | SHA-256 hex digest |
 
-## Philosophy: Agent as an Application
+Scoped declarations keep unrelated external tools out of a task. They are not a sandbox: declared tools and checker commands retain their own capabilities, and native environment access remains available.
 
-**AaaA** is the operating principle behind DustAgent. Four rules:
+## Patch a file
 
-1. **Single Responsibility** — one agent does one thing. `crawler` crawls. `patcher` patches. They don't do each other's job.
+```bash
+# Generate SEARCH/REPLACE blocks for inspection.
+dust patch --file src/lib.rs --dry-run "Simplify this function without changing behavior"
 
-2. **Zero Interaction** — no `[y/N]` prompts, no "Here's what I'll do" preambles. The agent receives input, executes, and exits. It is invoked by automation, not by humans waiting at a terminal.
+# Apply the generated blocks to the file.
+dust patch --file src/lib.rs "Simplify this function without changing behavior"
+```
 
-3. **Scoped MCP** — each app declares exactly the tools it needs. Nothing more enters the model's context window. Tool call accuracy approaches 100% because there are no wrong choices to make.
+The patcher reads the target file, asks the `patcher` app for SEARCH/REPLACE blocks, and applies them using the Rust fuzzy patch engine. `--range 15:30` focuses the supplied code context. `patch` takes its instruction as an argument; it does not consume instructions from STDIN.
 
-4. **Unix Pipeline** — agents are filters. `STDIN → agent → STDOUT`. Chain them with `|`. Orchestrate them with shell scripts. Use `jq`, `xargs`, `tee` between them. No special orchestration framework required.
+## Philosophy and implementation
 
-The result: agents composable like `curl`, `grep`, and `sed` — but with LLM reasoning embedded.
+- **One task per app.** A manifest defines a focused worker that a calling agent can compose with others.
+- **No interactive workflow.** The caller supplies input and handles the output, validation, and larger task.
+- **Explicit capabilities.** Apps declare their external MCP servers and local checkers.
+- **Ordinary composition.** Use files, pipes, and existing automation to connect workers.
 
----
+The Rust runtime provides manifest loading, non-streaming OpenAI-compatible chat completion calls, scoped stdio MCP clients, native utility tools, fuzzy patching, and bounded experience review. No resident service is required; external MCP servers and configured checkers run as subprocesses when invoked.
 
-## Contributing
+## Development
 
 ```bash
 cargo fmt --check
@@ -198,9 +190,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture guidelines and PR conventions.
+The current implementation has been checked with unit and integration tests, a mock-LLM CLI flow, actual checker execution, and a public HTTPS documentation fetch. These checks establish the execution flow; improvement in real-model task quality has not been measured.
 
----
+See [CONTRIBUTING.md](CONTRIBUTING.md), [the documentation index](docs/index.md), and [the scaffolding guide](docs/10_dust_new_스캐폴딩.md).
 
 ## License
 

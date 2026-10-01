@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 use dustagent::adapters::fuzzy_patch::FuzzyPatcher;
 use dustagent::adapters::openai::OpenAiProvider;
+use dustagent::application::ExperienceStore;
 use dustagent::application::core::DustCore;
 use dustagent::domain::manifest::{AppManifest, resolve_manifest_path};
 use dustagent::domain::patch::{LineRange, extract_blocks};
@@ -55,12 +56,35 @@ enum Commands {
 
     /// Scaffold a new application manifest using LLM
     New(NewArgs),
+
+    /// Automatically review recorded examples and improve future runs
+    Learn(LearnArgs),
+}
+
+#[derive(Args, Debug)]
+struct LearnArgs {
+    app: String,
+    /// Inspect records and review reasons without calling the model
+    #[arg(long)]
+    list: bool,
+    #[arg(short, long)]
+    model: Option<String>,
+    #[arg(long)]
+    experience_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
 struct RunArgs {
     /// Application name in apps/ (e.g. crawler, patcher) or path to manifest
     app: String,
+
+    /// Record runs and automatically review/reuse useful past examples
+    #[arg(long)]
+    experience: bool,
+
+    /// Override experience directory (implies --experience)
+    #[arg(long)]
+    experience_dir: Option<PathBuf>,
 
     /// Input query, URL, or prompt (reads from STDIN if omitted)
     #[arg(trailing_var_arg = true)]
@@ -124,13 +148,19 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Learn(args) => match handle_learn(args).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("Error: {err}");
+                ExitCode::FAILURE
+            }
+        },
         Commands::Run(args) => match handle_run(args).await {
             Ok(_) => ExitCode::SUCCESS,
             Err(err) => {
                 eprintln!("Error: {err}");
                 ExitCode::FAILURE
             }
-
         },
         Commands::Patch(args) => match handle_patch(args).await {
             Ok(_) => ExitCode::SUCCESS,
@@ -189,7 +219,10 @@ async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
     // Parse JSON: try full text first, then extract ```json block
     let mut json_val: serde_json::Value = serde_json::from_str(raw.trim()).or_else(|_| {
         // Try to extract a ```json ... ``` fenced block
-        let start = raw.find("```json").map(|i| i + 7).or_else(|| raw.find("```").map(|i| i + 3));
+        let start = raw
+            .find("```json")
+            .map(|i| i + 7)
+            .or_else(|| raw.find("```").map(|i| i + 3));
         let end = start.and_then(|s| raw[s..].find("```").map(|e| s + e));
         match (start, end) {
             (Some(s), Some(e)) => serde_json::from_str(raw[s..e].trim()),
@@ -199,7 +232,10 @@ async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
 
     // Overwrite `name` field with the provided name
     if let Some(obj) = json_val.as_object_mut() {
-        obj.insert("name".to_string(), serde_json::Value::String(args.name.clone()));
+        obj.insert(
+            "name".to_string(),
+            serde_json::Value::String(args.name.clone()),
+        );
     }
 
     let pretty = serde_json::to_string_pretty(&json_val)?;
@@ -243,12 +279,31 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<()> {
         .or_else(|| manifest.default_model.clone())
         .unwrap_or_else(|| "gpt-4o-mini".to_string());
 
-    let provider = OpenAiProvider::new(model)?;
+    let provider = OpenAiProvider::new(model.clone())?;
     let mut core = DustCore::load_manifest(&manifest_path, provider)?;
     core.init_scoped_mcp().await?;
 
-    let output = core.execute(&user_input).await?;
+    let result = if args.experience || args.experience_dir.is_some() {
+        let store = ExperienceStore::new(experience_directory(args.experience_dir)?);
+        match dustagent::application::reinforcement::reinforce_with_research(
+            &manifest,
+            &store,
+            OpenAiProvider::new(model)?,
+        )
+        .await
+        {
+            Ok(report) => eprintln!(
+                "[dustagent] automatic review: {}",
+                serde_json::to_string(&report)?
+            ),
+            Err(err) => eprintln!("[dustagent] automatic review failed: {err}"),
+        }
+        core.execute_with_experience(&user_input, &store).await
+    } else {
+        core.execute(&user_input).await
+    };
     core.shutdown().await?;
+    let output = result?;
 
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
@@ -341,5 +396,58 @@ async fn handle_patch(args: PatchArgs) -> anyhow::Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn experience_directory(path: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    if let Some(path) = path {
+        return Ok(path);
+    }
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| anyhow::anyhow!("HOME missing; use --experience-dir"))?;
+    Ok(PathBuf::from(home).join(".dustagent/experiences"))
+}
+
+async fn handle_learn(args: LearnArgs) -> anyhow::Result<()> {
+    let manifest =
+        AppManifest::from_file(resolve_manifest_path(&args.app, &std::env::current_dir()?)?)?;
+    let store = ExperienceStore::new(experience_directory(args.experience_dir)?);
+    if args.list {
+        let records: Vec<_> = store
+            .list(&manifest)?
+            .into_iter()
+            .map(|e| {
+                serde_json::json!({
+                    "input": e.input, "output": e.output, "completed": e.completed,
+                    "selected": e.approved, "reviewed": e.reviewed, "reason": e.review_reason,
+                    "timestamp_ms": e.timestamp_ms, "validation": e.validation, "sources": e.sources
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&records)?);
+    } else {
+        let records = store.list(&manifest)?;
+        if records
+            .iter()
+            .all(|e| e.reviewed || e.approved || !e.completed)
+        {
+            println!(
+                "{}",
+                serde_json::json!({"reviewed":0,"selected":0,"rejected":0,"skipped":records.len()})
+            );
+            return Ok(());
+        }
+        let model = args
+            .model
+            .or_else(|| manifest.default_model.clone())
+            .unwrap_or_else(|| "gpt-4o-mini".into());
+        let report = dustagent::application::reinforcement::reinforce_with_research(
+            &manifest,
+            &store,
+            OpenAiProvider::new(model)?,
+        )
+        .await?;
+        println!("{}", serde_json::to_string(&report)?);
+    }
     Ok(())
 }
