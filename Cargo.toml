@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 authors = ["DustAgent Contributors"]
 description = "Ultra-lightweight Unix-style Agent as an Application (AaaA) runtime"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/choratools/dustagent"
+homepage = "https://github.com/choratools/dustagent"
+readme = "README.md"
+keywords = ["ai-agent", "mcp", "llm", "unix", "patcher"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
 name = "dustagent"

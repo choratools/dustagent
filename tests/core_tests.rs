@@ -24,7 +24,10 @@ struct MockLlmProvider {
         Mutex<
             Option<
                 Arc<
-                    dyn Fn(&[ChatMessage], Option<&[ToolDefinition]>) -> dustagent::Result<LlmResponse>
+                    dyn Fn(
+                            &[ChatMessage],
+                            Option<&[ToolDefinition]>,
+                        ) -> dustagent::Result<LlmResponse>
                         + Send
                         + Sync,
                 >,
@@ -161,6 +164,7 @@ async fn test_single_shot_execution_without_tools() {
         default_model: Some("gpt-4o-mini".to_string()),
         mcp_servers: HashMap::new(),
         output_format: Some("text".to_string()),
+        max_turns: None,
     };
 
     let expected_output = "The quick brown fox jumps over the lazy dog.";
@@ -201,6 +205,7 @@ async fn test_multiturn_tool_execution() {
         default_model: Some("gpt-4o-mini".to_string()),
         mcp_servers: HashMap::new(),
         output_format: Some("raw_json".to_string()),
+        max_turns: None,
     };
 
     // Prepare mock MCP client exposing "fetch" tool
@@ -313,6 +318,7 @@ async fn test_tool_execution_error_handling() {
         default_model: None,
         mcp_servers: HashMap::new(),
         output_format: None,
+        max_turns: None,
     };
 
     // Tool call for non-existent server
@@ -352,6 +358,7 @@ async fn test_max_turns_limit() {
         default_model: None,
         mcp_servers: HashMap::new(),
         output_format: None,
+        max_turns: None,
     };
 
     // Infinite tool calling loop
