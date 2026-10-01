@@ -69,6 +69,9 @@ pub struct AppManifest {
     /// Preferred output format (e.g. "raw_json", "search_replace_patch").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_format: Option<String>,
+    /// Optional max conversation turns for tool calling loop (default: 10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
 }
 
 impl AppManifest {

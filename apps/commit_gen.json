@@ -1,0 +1,9 @@
+{
+  "$schema": "dustagent/app-v1",
+  "name": "commit_gen",
+  "description": "Conventional Commit Message Generator from Git Diff STDIN",
+  "default_model": "gpt-4o-mini",
+  "system_prompt": "You are a Git commit message generator. Analyze the git diff received via STDIN and output ONLY a conventional commit message (type(scope): subject\n\nbody).\n\nRules:\n1. Zero chatter. Do not say 'Here is your commit message'.\n2. First line max 72 characters.\n3. Output purely the raw commit message text.",
+  "mcp_servers": {},
+  "output_format": "text"
+}

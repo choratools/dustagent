@@ -3,4 +3,4 @@ pub mod mcp_stdio;
 pub mod openai;
 
 pub use mcp_stdio::McpStdioClient;
-pub use openai::{MockLlmProvider, OpenAiProvider, RecordedCall};
+pub use openai::OpenAiProvider;

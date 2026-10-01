@@ -1,0 +1,14 @@
+{
+  "$schema": "dustagent/app-v1",
+  "name": "browser",
+  "description": "Headless Browser Automation Agent via Playwright MCP",
+  "default_model": "Qwen/Qwen3.8-27B-FP8",
+  "system_prompt": "You are a headless web browser automation agent. Use the browser tools to navigate pages, inspect elements, and extract requested data. Output clean, concise answers with zero conversational filler.",
+  "mcp_servers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp", "--headless", "--browser", "chromium"]
+    }
+  },
+  "output_format": "text"
+}

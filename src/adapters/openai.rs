@@ -3,8 +3,6 @@ use crate::{DustError, Result};
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 
 /// Production OpenAI-compatible LLM Gateway adapter.
 pub struct OpenAiProvider {
@@ -234,119 +232,6 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
-/// A recorded chat call made to the `MockLlmProvider`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecordedCall {
-    pub messages: Vec<ChatMessage>,
-    pub tools: Option<Vec<ToolDefinition>>,
-}
-
-/// A thread-safe mock provider for unit & integration tests without network or API keys.
-#[derive(Clone, Default)]
-pub struct MockLlmProvider {
-    responses: Arc<Mutex<VecDeque<LlmResponse>>>,
-    recorded_calls: Arc<Mutex<Vec<RecordedCall>>>,
-    #[allow(clippy::type_complexity)]
-    handler: Arc<
-        Mutex<
-            Option<
-                Arc<
-                    dyn Fn(&[ChatMessage], Option<&[ToolDefinition]>) -> Result<LlmResponse>
-                        + Send
-                        + Sync,
-                >,
-            >,
-        >,
-    >,
-}
-
-impl MockLlmProvider {
-    /// Creates an empty MockLlmProvider.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Creates a MockLlmProvider with a sequence of pre-queued responses.
-    pub fn with_responses(responses: impl IntoIterator<Item = LlmResponse>) -> Self {
-        let provider = Self::new();
-        for resp in responses {
-            provider.add_response(resp);
-        }
-        provider
-    }
-
-    /// Adds a response to the back of the response queue.
-    pub fn add_response(&self, response: LlmResponse) {
-        self.responses.lock().unwrap().push_back(response);
-    }
-
-    /// Sets a dynamic handler closure for generating responses.
-    pub fn with_handler<F>(self, handler: F) -> Self
-    where
-        F: Fn(&[ChatMessage], Option<&[ToolDefinition]>) -> Result<LlmResponse>
-            + Send
-            + Sync
-            + 'static,
-    {
-        *self.handler.lock().unwrap() = Some(Arc::new(handler));
-        self
-    }
-
-    /// Returns all recorded calls made to this provider.
-    pub fn recorded_calls(&self) -> Vec<RecordedCall> {
-        self.recorded_calls.lock().unwrap().clone()
-    }
-
-    /// Returns the number of chat calls made so far.
-    pub fn call_count(&self) -> usize {
-        self.recorded_calls.lock().unwrap().len()
-    }
-
-    /// Returns the most recent call, if any.
-    pub fn last_call(&self) -> Option<RecordedCall> {
-        self.recorded_calls.lock().unwrap().last().cloned()
-    }
-
-    /// Returns the messages from the most recent call, if any.
-    pub fn last_messages(&self) -> Option<Vec<ChatMessage>> {
-        self.last_call().map(|c| c.messages)
-    }
-
-    /// Clears all recorded calls and queued responses.
-    pub fn clear(&self) {
-        self.responses.lock().unwrap().clear();
-        self.recorded_calls.lock().unwrap().clear();
-    }
-}
-
-#[async_trait]
-impl LlmProvider for MockLlmProvider {
-    async fn chat(
-        &self,
-        messages: &[ChatMessage],
-        tools: Option<&[ToolDefinition]>,
-    ) -> Result<LlmResponse> {
-        // Record the incoming request
-        let call = RecordedCall {
-            messages: messages.to_vec(),
-            tools: tools.map(|t| t.to_vec()),
-        };
-        self.recorded_calls.lock().unwrap().push(call);
-
-        // Check if dynamic handler is registered
-        let handler_opt = self.handler.lock().unwrap().clone();
-        if let Some(handler) = handler_opt {
-            return handler(messages, tools);
-        }
-
-        // Otherwise pop from queued responses
-        let mut responses = self.responses.lock().unwrap();
-        responses.pop_front().ok_or_else(|| {
-            DustError::Llm("MockLlmProvider: no queued responses available".to_string())
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,43 +261,5 @@ mod tests {
                 std::env::set_var("OPENAI_API_KEY", val);
             }
         }
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_provider_queue() {
-        let mock = MockLlmProvider::with_responses(vec![
-            LlmResponse::text("first"),
-            LlmResponse::text("second"),
-        ]);
-
-        let msgs = vec![ChatMessage::user("hi")];
-        let r1 = mock.chat(&msgs, None).await.unwrap();
-        assert_eq!(r1.content.as_deref(), Some("first"));
-
-        let r2 = mock.chat(&msgs, None).await.unwrap();
-        assert_eq!(r2.content.as_deref(), Some("second"));
-
-        let r3 = mock.chat(&msgs, None).await;
-        assert!(r3.is_err());
-        assert_eq!(mock.call_count(), 3);
-        assert_eq!(mock.last_messages().unwrap().len(), 1);
-
-        mock.clear();
-        assert_eq!(mock.call_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_provider_handler() {
-        let mock = MockLlmProvider::new().with_handler(|msgs, _tools| {
-            let last_user = msgs.iter().rev().find(|m| m.role == "user");
-            let echo = last_user
-                .and_then(|m| m.content.clone())
-                .unwrap_or_default();
-            Ok(LlmResponse::text(format!("Echo: {echo}")))
-        });
-
-        let msgs = vec![ChatMessage::user("ping")];
-        let res = mock.chat(&msgs, None).await.unwrap();
-        assert_eq!(res.content.as_deref(), Some("Echo: ping"));
     }
 }

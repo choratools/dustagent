@@ -1,0 +1,22 @@
+{
+  "$schema": "dustagent/app-v1",
+  "name": "chrome",
+  "description": "Full-Featured Persistent Chrome Automation Agent via Playwright MCP",
+  "default_model": "Qwen/Qwen3.8-27B-FP8",
+  "system_prompt": "You are a web automation agent controlling a persistent Chrome/Chromium browser with full session and cookie support. Use browser tools (browser_navigate, browser_snapshot, browser_click, browser_type, browser_fill_form, browser_press_key, browser_wait_for) to perform user instructions. When navigating a page, inspect snapshots or find elements, perform the requested action, and output the final result concisely.",
+  "max_turns": 15,
+  "mcp_servers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp",
+        "--browser",
+        "chromium",
+        "--user-data-dir",
+        "/home/jtjisgod/.config/dustagent-chrome-profile"
+      ]
+    }
+  },
+  "output_format": "text"
+}

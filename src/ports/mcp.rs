@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -194,80 +191,5 @@ impl<M: McpClient + ?Sized> McpClient for Box<M> {
 
     async fn close(&mut self) -> Result<()> {
         (**self).close().await
-    }
-}
-
-/// A thread-safe mock MCP client for testing.
-#[derive(Clone, Default)]
-pub struct MockMcpClient {
-    pub tools: Vec<McpTool>,
-    pub tool_results: Arc<Mutex<HashMap<String, Value>>>,
-    pub recorded_calls: Arc<Mutex<Vec<(String, Value)>>>,
-    pub initialized: bool,
-    pub closed: bool,
-}
-
-impl MockMcpClient {
-    pub fn new(tools: Vec<McpTool>) -> Self {
-        Self {
-            tools,
-            tool_results: Arc::new(Mutex::new(HashMap::new())),
-            recorded_calls: Arc::new(Mutex::new(Vec::new())),
-            initialized: false,
-            closed: false,
-        }
-    }
-
-    pub fn with_tool_result(self, tool_name: impl Into<String>, result: Value) -> Self {
-        self.tool_results
-            .lock()
-            .unwrap()
-            .insert(tool_name.into(), result);
-        self
-    }
-
-    pub fn add_tool_result(&self, tool_name: impl Into<String>, result: Value) {
-        self.tool_results
-            .lock()
-            .unwrap()
-            .insert(tool_name.into(), result);
-    }
-
-    pub fn recorded_calls(&self) -> Vec<(String, Value)> {
-        self.recorded_calls.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl McpClient for MockMcpClient {
-    async fn initialize(&mut self) -> Result<()> {
-        self.initialized = true;
-        Ok(())
-    }
-
-    async fn list_tools(&mut self) -> Result<Vec<McpTool>> {
-        Ok(self.tools.clone())
-    }
-
-    async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value> {
-        self.recorded_calls
-            .lock()
-            .unwrap()
-            .push((name.to_string(), arguments.clone()));
-
-        if let Some(res) = self.tool_results.lock().unwrap().get(name) {
-            Ok(res.clone())
-        } else {
-            Ok(serde_json::json!({
-                "status": "success",
-                "tool": name,
-                "arguments": arguments,
-            }))
-        }
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        self.closed = true;
-        Ok(())
     }
 }

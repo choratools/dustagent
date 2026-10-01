@@ -20,11 +20,12 @@ pub struct DustCore<P: LlmProvider> {
 impl<P: LlmProvider> DustCore<P> {
     /// Creates a new `DustCore` instance with a loaded manifest and LLM provider.
     pub fn new(manifest: AppManifest, provider: P) -> Self {
+        let max_turns = manifest.max_turns.unwrap_or(10);
         Self {
             manifest,
             provider,
             mcp_clients: HashMap::new(),
-            max_turns: 5,
+            max_turns,
         }
     }
 

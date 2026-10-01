@@ -1,12 +1,155 @@
-use serde_json::json;
-use std::collections::HashMap;
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
-use dustagent::adapters::openai::MockLlmProvider;
 use dustagent::application::DustCore;
 use dustagent::domain::manifest::{AppManifest, McpServerConfig};
-use dustagent::ports::llm::{ChatMessage, LlmResponse, ToolCall};
-use dustagent::ports::mcp::{McpTool, MockMcpClient};
+use dustagent::ports::llm::{ChatMessage, LlmProvider, LlmResponse, ToolCall, ToolDefinition};
+use dustagent::ports::mcp::{McpClient, McpTool};
+
+#[derive(Debug, Clone, PartialEq)]
+struct RecordedCall {
+    pub messages: Vec<ChatMessage>,
+    pub tools: Option<Vec<ToolDefinition>>,
+}
+
+#[derive(Clone, Default)]
+struct MockLlmProvider {
+    responses: Arc<Mutex<VecDeque<LlmResponse>>>,
+    recorded_calls: Arc<Mutex<Vec<RecordedCall>>>,
+    #[allow(clippy::type_complexity)]
+    handler: Arc<
+        Mutex<
+            Option<
+                Arc<
+                    dyn Fn(&[ChatMessage], Option<&[ToolDefinition]>) -> dustagent::Result<LlmResponse>
+                        + Send
+                        + Sync,
+                >,
+            >,
+        >,
+    >,
+}
+
+impl MockLlmProvider {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn with_responses(responses: impl IntoIterator<Item = LlmResponse>) -> Self {
+        let provider = Self::new();
+        for resp in responses {
+            provider.responses.lock().unwrap().push_back(resp);
+        }
+        provider
+    }
+
+    fn with_handler<F>(self, handler: F) -> Self
+    where
+        F: Fn(&[ChatMessage], Option<&[ToolDefinition]>) -> dustagent::Result<LlmResponse>
+            + Send
+            + Sync
+            + 'static,
+    {
+        *self.handler.lock().unwrap() = Some(Arc::new(handler));
+        self
+    }
+
+    fn call_count(&self) -> usize {
+        self.recorded_calls.lock().unwrap().len()
+    }
+
+    fn last_call(&self) -> Option<RecordedCall> {
+        self.recorded_calls.lock().unwrap().last().cloned()
+    }
+
+    fn recorded_calls(&self) -> Vec<RecordedCall> {
+        self.recorded_calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for MockLlmProvider {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+    ) -> dustagent::Result<LlmResponse> {
+        self.recorded_calls.lock().unwrap().push(RecordedCall {
+            messages: messages.to_vec(),
+            tools: tools.map(|t| t.to_vec()),
+        });
+
+        let handler_opt = self.handler.lock().unwrap().clone();
+        if let Some(handler) = handler_opt {
+            return handler(messages, tools);
+        }
+
+        let mut responses = self.responses.lock().unwrap();
+        responses.pop_front().ok_or_else(|| {
+            dustagent::DustError::Llm("TestLlmProvider: no responses left".to_string())
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct MockMcpClient {
+    tools: Vec<McpTool>,
+    tool_results: Arc<Mutex<HashMap<String, Value>>>,
+    recorded_calls: Arc<Mutex<Vec<(String, Value)>>>,
+}
+
+impl MockMcpClient {
+    fn new(tools: Vec<McpTool>) -> Self {
+        Self {
+            tools,
+            tool_results: Arc::new(Mutex::new(HashMap::new())),
+            recorded_calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_tool_result(self, tool_name: impl Into<String>, result: Value) -> Self {
+        self.tool_results
+            .lock()
+            .unwrap()
+            .insert(tool_name.into(), result);
+        self
+    }
+
+    fn recorded_calls(&self) -> Vec<(String, Value)> {
+        self.recorded_calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl McpClient for MockMcpClient {
+    async fn initialize(&mut self) -> dustagent::Result<()> {
+        Ok(())
+    }
+
+    async fn list_tools(&mut self) -> dustagent::Result<Vec<McpTool>> {
+        Ok(self.tools.clone())
+    }
+
+    async fn call_tool(&mut self, name: &str, arguments: Value) -> dustagent::Result<Value> {
+        self.recorded_calls
+            .lock()
+            .unwrap()
+            .push((name.to_string(), arguments.clone()));
+
+        if let Some(res) = self.tool_results.lock().unwrap().get(name) {
+            Ok(res.clone())
+        } else {
+            Ok(json!({ "status": "success", "tool": name }))
+        }
+    }
+
+    async fn close(&mut self) -> dustagent::Result<()> {
+        Ok(())
+    }
+}
 
 #[tokio::test]
 async fn test_single_shot_execution_without_tools() {
