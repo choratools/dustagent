@@ -15,3 +15,6 @@ pub mod execution;
 pub use execution::{ExecutionReport, StopReason, ToolRecord, ToolStatus, TurnRecord};
 
 pub mod checkpoint;
+
+pub mod package;
+pub mod skills;

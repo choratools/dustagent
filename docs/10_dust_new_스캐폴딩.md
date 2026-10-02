@@ -20,7 +20,7 @@ aliases: [dust new, 스캐폴딩, 메타에이전트, scaffold agent]
 
 ## 1. `dust new`란 무엇인가?
 
-`dust new`는 **새로운 AaaA 에이전트 매니페스트(`apps/*.json`)를 생성하는 메타 명령어**입니다.
+`dust new`는 **새로운 AaaA 에이전트 매니페스트(`apps/<name>/app.json`)를 생성하는 메타 명령어**입니다.
 
 그런데 핵심은 여기에 있습니다: `dust new`는 단순한 템플릿 복사가 아닙니다.  
 **`dust new` 자체가 하나의 내장 AaaA 에이전트 — `scaffold` 에이전트 — 를 실행합니다.**
@@ -28,14 +28,14 @@ aliases: [dust new, 스캐폴딩, 메타에이전트, scaffold agent]
 즉, 에이전트가 에이전트를 설계하는 **메타(Meta) 구조**입니다.
 
 ```
-사용자 → dust new [이름] "[설명]" → scaffold 에이전트(LLM) → apps/[이름].json
+사용자 → dust new [이름] "[설명]" → scaffold 에이전트(LLM) → apps/[이름]/app.json
 ```
 
 `dust new crawler "Extract structured data from URLs as JSON"` 한 줄이면:
 
 1. 내장 `scaffold` 에이전트가 활성화됩니다.
 2. LLM이 설명 문자열을 분석하여 적합한 시스템 프롬프트, MCP 서버 조합, 출력 포맷을 **스스로 결정**합니다.
-3. 완성된 `apps/crawler.json`이 생성됩니다.
+3. 완성된 `apps/crawler/app.json`이 생성됩니다.
 4. 즉시 `dust run crawler "..."` 가 가능해집니다.
 
 ---
@@ -51,7 +51,7 @@ aliases: [dust new, 스캐폴딩, 메타에이전트, scaffold agent]
   "name": "scaffold",
   "description": "Design a new DustAgent app manifest from a natural-language description",
   "default_model": "gpt-4o",
-  "system_prompt": "You are a DustAgent app architect. Given an agent name and a one-line description, produce a complete apps/*.json manifest.\n\nRules:\n1. Output ONLY valid JSON matching the dustagent/app-v1 schema. No markdown fences. No explanation.\n2. Write a system_prompt that is laser-focused: single responsibility, zero-chatter, output-format explicit.\n3. Select the minimum viable set of mcp_servers needed for the task. If no external tool is required, output an empty object {}.\n4. Choose output_format: 'raw_json' for structured data, 'text' for prose, 'search_replace_patch' for SEARCH/REPLACE code patches.\n5. Never add mcp_servers that are not strictly necessary.",
+  "system_prompt": "You are a DustAgent app architect. Given an agent name and a one-line description, produce a complete apps/<name>/app.json manifest.\n\nRules:\n1. Output ONLY valid JSON matching the dustagent/app-v1 schema. No markdown fences. No explanation.\n2. Write a system_prompt that is laser-focused: single responsibility, zero-chatter, output-format explicit.\n3. Select the minimum viable set of mcp_servers needed for the task. If no external tool is required, output an empty object {}.\n4. Choose output_format: 'raw_json' for structured data, 'text' for prose, 'search_replace_patch' for SEARCH/REPLACE code patches.\n5. Never add mcp_servers that are not strictly necessary.",
   "mcp_servers": {},
   "output_format": "raw_json"
 }
@@ -70,7 +70,7 @@ flowchart TD
     CLI["dust CLI\n(main.rs: SubCommand::New)"]
     SA["내장 scaffold 에이전트\n(apps/scaffold.json)"]
     LLM["LLM\n(gpt-4o)"]
-    OUT["apps/crawler.json\n생성 완료"]
+    OUT["apps/crawler/app.json\n생성 완료"]
     RUN["즉시 실행 가능\ndust run crawler \"...\""]
 
     U --> CLI
@@ -87,7 +87,7 @@ flowchart TD
 2. **scaffold 에이전트 로드**: `apps/scaffold.json` 매니페스트가 micro-kernel에 로드됩니다.
 3. **컨텍스트 주입**: 사용자가 입력한 `name`과 `description`이 STDIN으로 scaffold 에이전트에 전달됩니다.
 4. **LLM 추론**: scaffold 에이전트의 LLM이 app-v1 스키마에 맞는 JSON 매니페스트를 생성합니다.
-5. **파일 저장**: 출력된 JSON이 `apps/<name>.json`에 원자적으로 저장됩니다.
+5. **파일 저장**: 출력된 JSON이 `apps/<name>/app.json`에 저장됩니다.
 6. **즉시 실행**: 컴파일 없이 바로 `dust run <name>`이 가능합니다.
 
 ---
@@ -100,7 +100,7 @@ flowchart TD
 dust new crawler "Extract structured data from URLs as JSON"
 ```
 
-생성 결과 (`apps/crawler.json`):
+생성 결과 (`apps/crawler/app.json`):
 ```json
 {
   "$schema": "dustagent/app-v1",
@@ -124,7 +124,7 @@ dust new crawler "Extract structured data from URLs as JSON"
 dust new sql_tuner "Analyze PostgreSQL EXPLAIN plans and suggest index optimizations"
 ```
 
-생성 결과 (`apps/sql_tuner.json`):
+생성 결과 (`apps/sql_tuner/app.json`):
 ```json
 {
   "$schema": "dustagent/app-v1",
@@ -143,7 +143,7 @@ dust new sql_tuner "Analyze PostgreSQL EXPLAIN plans and suggest index optimizat
 dust new reviewer "Review a git diff for bugs, security issues, and style violations"
 ```
 
-생성 결과 (`apps/reviewer.json`):
+생성 결과 (`apps/reviewer/app.json`):
 ```json
 {
   "$schema": "dustagent/app-v1",
@@ -239,7 +239,9 @@ scaffold 에이전트 자체가 JSON 파일이므로, **조직의 에이전트 �
 ---
 
 > [!TIP]
-> **처음부터 완벽할 필요 없습니다.** `dust new`로 초안을 만들고, 부족한 부분만 `apps/*.json`을 직접 편집하는 방식이 가장 효율적입니다. scaffold 에이전트는 80%의 반복 설계 작업을 대신합니다.
+> **처음부터 완벽할 필요 없습니다.** `dust new`로 초안을 만들고, 부족한 부분만 `apps/<name>/app.json`을 직접 편집하는 방식이 가장 효율적입니다. scaffold 에이전트는 80%의 반복 설계 작업을 대신합니다.
 
 > [!IMPORTANT]
-> **`dust new`가 생성한 에이전트를 실제로 실행하기 전에 `apps/<name>.json`을 한 번 검토하세요.** 특히 `mcp_servers`에 선택된 외부 도구가 예상과 일치하는지 확인하는 것이 보안과 비용 관리의 기본입니다.
+> **`dust new`가 생성한 에이전트를 실제로 실행하기 전에 `apps/<name>/app.json`을 한 번 검토하세요.** 특히 `mcp_servers`에 선택된 외부 도구가 예상과 일치하는지 확인하는 것이 보안과 비용 관리의 기본입니다.
+
+현재 dust new는 package 메타데이터와 빈 skills/ 디렉터리도 생성한다. 기존 디렉터리는 덮어쓰지 않는다. --stdout은 파일을 만들지 않고 메타데이터를 포함한 JSON만 출력한다. skill 작성과 배포는 [[14_앱_패키지_및_스킬]]를 참고한다.

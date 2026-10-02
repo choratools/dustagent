@@ -35,7 +35,7 @@ DustAgent is built around the **Unix Philosophy**: *"Do one thing and do it well
 
 ## 📐 Architecture Guidelines
 
-- **Micro-Kernel Simplicity**: Keep the Rust core engine minimal. New agent capabilities should be added as **AaaA manifests in `apps/*.json`**, not by adding ad-hoc Rust logic.
+- **Micro-Kernel Simplicity**: Keep the Rust core engine minimal. New agent capabilities should be added as **AaaA packages in `apps/<name>/` or legacy manifests in `apps/*.json`**, not by adding ad-hoc Rust logic.
 - **Zero-Chatter Rule**: Prompts and outputs must adhere strictly to the zero-chatter policy. Do not add pleasantries, Markdown introductions, or conversational explanations to agent outputs.
 - **Atomic Operations**: All file modification logic must guarantee 100% rollback on failure via `FuzzyPatcher`.
 

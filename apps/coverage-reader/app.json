@@ -1,0 +1,17 @@
+{
+  "$schema": "dustagent/app-v1",
+  "name": "coverage-reader",
+  "package": {
+    "name": "coverage-reader",
+    "version": "0.1.0",
+    "dust_version": ">=0.1.0"
+  },
+  "description": "Report observed and missing coverage from supplied crawl evidence.",
+  "system_prompt": "Use the app-owned coverage skill before assessing supplied crawl evidence. Return JSON only. Read references and the result template when needed. Do not invent observations or claim complete coverage without evidence.",
+  "skills": [
+    "coverage"
+  ],
+  "mcp_servers": {},
+  "max_turns": 5,
+  "output_format": "raw_json"
+}

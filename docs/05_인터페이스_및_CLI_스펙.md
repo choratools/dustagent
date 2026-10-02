@@ -1,129 +1,81 @@
 ---
 id: 05_interface_and_cli_spec
-title: 05. 인터페이스 및 CLI 스펙 (Interface & CLI Spec)
+title: 05. 인터페이스 및 CLI 스펙
 type: spec
 tags: [dustagent, cli, spec, pipe, headless, stdin-stdout]
 created: 2026-10-01
-updated: 2026-10-01
+updated: 2026-10-02
 status: active
 aliases: [CLI 스펙, 인터페이스 명세]
 ---
 
-# 💻 05. 인터페이스 및 CLI 스펙
+# 인터페이스 및 CLI 스펙
 
-> 관련 문서: [[01_개념_및_설계철학]], [[02_시스템_아키텍처]], [[04_인라인_패치_및_수정_엔진]]
+호출하는 에이전트가 입력과 실행 옵션을 정하고 STDOUT 결과·종료 코드를 처리한다. 실행 중 대화형 확인은 없다. 아래는 현재 dust --help와 각 하위 명령 도움말을 기준으로 작성한 실행 계약이다.
 
-DustAgent는 사용자와 대화하는 인터랙티브 프롬프트를 일절 배제하고, **순수 CLI 인자 및 UNIX 표준 스트림(STDIN/STDOUT)**으로만 통신합니다.
+## 명령
 
----
+| 명령 | 입력 | 산출 |
+| --- | --- | --- |
+| dust run APP [OPTIONS] [INPUT...] | 앱 이름, JSON 경로, 패키지 디렉터리 또는 .dustpkg | 완료한 최종 응답 또는 --json 실행 보고서 |
+| dust new NAME DESCRIPTION | 자연어 작업 설명 | apps/NAME/app.json 및 빈 skills/; --stdout이면 JSON만 출력 |
+| dust pack SOURCE [-o OUTPUT] | app.json이 있는 패키지 디렉터리 | .dustpkg 생성 후 경로 출력 |
+| dust install SOURCE [--store STORE] | 로컬 디렉터리 또는 .dustpkg | 설치 후 디렉터리 경로 출력 |
+| dust learn APP [--list] | 앱별 경험 기록 | 자동 조사·검토; --list이면 기록 조회 |
+| dust patch --file FILE INSTRUCTION | 파일과 편집 지시 | SEARCH/REPLACE 적용; --dry-run이면 블록만 출력 |
 
-## 1. 실행 모드 (Operating Modes)
+## 실행과 파이프
 
-```mermaid
-graph LR
-    subgraph Mode1 ["1. 파일 인플레이스 모드 (File In-Place)"]
-        F1[파일 지정 + 범위] --> M1[DustAgent 실행] --> F2[파일 직접 수정 완료]
-    end
-
-    subgraph Mode2 ["2. 유닉스 파이프 모드 (UNIX Pipeline)"]
-        S1[STDIN 버퍼] --> M2[DustAgent 실행] --> S2[STDOUT 스트림]
-    end
-
-    subgraph Mode3 ["3. JSON IPC 모드 (IDE Bridge)"]
-        J1[JSON Request] --> M3[DustAgent 실행] --> J2[JSON Response / Patch]
-    end
+```sh
+dust run ./apps/coverage-reader --json "discovered=290 observed=100"
+dust pack ./apps/coverage-reader
+dust run ./coverage-reader-0.1.0.dustpkg "discovered=290 observed=100"
+git diff --cached | dust run commit_gen
 ```
 
----
+run은 INPUT이 없으면 STDIN을 읽는다. 옵션은 입력 문장 앞에 둔다. --resume은 원래 입력을 체크포인트에서 읽으며 새 입력을 허용하지 않는다. 모델은 --model/-m으로 지정한다. API 설정은 OPENAI_API_KEY와 선택적 OPENAI_BASE_URL을 사용한다.
 
-## 2. CLI 명령어 및 플래그 명세
+| run 옵션 | 의미 |
+| --- | --- |
+| --json | 미완료 실행도 구조화된 보고서로 STDOUT 출력 |
+| --report PATH | 종료 보고서를 별도 파일로 저장 |
+| --checkpoint PATH | 실행 경계에서 대화와 도구 결과 저장; 새 파일 필요 |
+| --resume PATH | 안전한 체크포인트 재개; --checkpoint와 동시 사용 불가 |
+| --max-turns N | 이번 호출의 모델 턴 예산 |
+| --timeout-ms MS | 시작·경험 검토·모델·도구의 전체 시간 예산 |
+| --tool-timeout-ms MS | 도구별 시간 제한 |
+| --experience | 실행 기록과 과거 사례 검토·재사용 |
+| --experience-dir PATH | 경험 저장소 지정; --experience를 포함 |
 
-```bash
-dustagent [OPTIONS] "<INSTRUCTION>"
+기본 출력은 완료 시에만 최종 응답을 쓴다. 진단은 STDERR로 쓴다. --json도 종료 코드를 바꾸지 않으므로 호출자는 반드시 확인해야 한다.
+
+| 종료 코드 | 의미 |
+| --- | --- |
+| 0 | 실행 완료 및 설정된 검사 통과 |
+| 1 | CLI·설정·파일 저장 오류 |
+| 2 | 턴 예산 소진 |
+| 3 | 전체 또는 도구 시간 제한 |
+| 4 | 모델의 빈 최종 응답 |
+| 5 | 실행 오류 |
+| 6 | 결과 검사 실패 |
+
+## 패키지와 skill
+
+설치는 선택 사항이다. 설치 이름은 기본 ~/.dustagent/packages에서 찾는다. DUST_PACKAGE_HOME으로 저장소를 바꿀 수 있다. --store로 설치했으면 같은 저장소를 DUST_PACKAGE_HOME으로 지정하거나 설치된 디렉터리 경로로 실행한다.
+
+```sh
+dust install ./coverage-reader-0.1.0.dustpkg --store ./local-packages
+DUST_PACKAGE_HOME=./local-packages dust run coverage-reader "입력"
 ```
 
-### 주요 옵션 표
+pack의 출력 부모 디렉터리는 미리 있어야 하며 출력은 원본 패키지 밖에 둔다. pack/install/new는 기존 대상을 덮어쓰지 않는다. 앱에 선언된 skill만 전용 읽기 도구에 표시된다. 파일 구조·접근 제한·배포 규격은 [[14_앱_패키지_및_스킬]]을 참고한다.
 
-| 플래그 | 단축형 | 기본값 | 설명 |
-| :--- | :--- | :--- | :--- |
-| `--file` | `-f` | None | 수정할 대상 파일 경로 |
-| `--range` | `-r` | None | 수정 대상 라인 범위 (예: `15:30` 또는 `15`부터 단일 행) |
-| `--mcp` | `-m` | auto | 활성화할 MCP 서버 이름 (지정 안 할 시 `.mcp.json` 자동 로드) |
-| `--model` | `-M` | `claude-3-5-sonnet` | 추론에 사용할 백엔드 모델 |
-| `--pipe` | `-p` | false | STDIN 입력을 받아 STDOUT으로만 결과를 출력하는 필터 모드 |
-| `--diff` | `-d` | false | 파일을 직접 수정하지 않고 Unified Diff 형식으로 STDOUT 출력 |
-| `--dry-run`| | false | 실제 파일에 쓰지 않고 적용될 Search/Replace 블록만 검증 |
-| `--quiet` | `-q` | false | 모든 로깅 침묵 (에러 발생 시에만 exit code != 0 반환) |
+## 편집 명령
 
----
-
-## 3. 대표 사용 시나리오
-
-### 1) 특정 파일의 특정 함수 인라인 수정
-```bash
-# app.py 40번째부터 60번째 라인을 비동기(async)로 변경
-dustagent -f src/app.py -r 40:60 "이 핸들러를 asyncio 기반으로 리팩터링해줘"
+```sh
+dust patch --file src/app.py --range 40:60 --dry-run "Convert this handler to async"
 ```
 
-### 2) 파이프라인 필터 (Vim/Neovim visual selection 연동)
-```bash
-# 선택 영역을 stdin으로 밀어넣고 stdout으로 교체
-cat snippet.py | dustagent -p "이 함수에 타입 힌트와 Google 스타일 docstring 추가" > snippet_new.py
-```
+patch는 지시문을 명령 인자로 받는다. --range/-r는 선택적 줄 범위이며 --dry-run은 모델이 만든 블록을 출력하고 파일을 바꾸지 않는다. --diff, --pipe, --mcp 같은 초기 설계 플래그와 IDE JSON-IPC 전용 프로토콜은 현재 구현하지 않았다. IDE는 run의 STDIN/STDOUT 또는 --json 보고서를 사용할 수 있다.
 
-### 3) MCP 리소스를 결합한 인라인 패치
-```bash
-# git staged 변경점이나 DB 스키마를 참고하여 코드 수정
-dustagent -f models/user.py "users 테이블의 최근 마이그레이션 변경사항 반영"
-```
-
----
-
-## 4. IDE 에디터 플러그인 연동 규격 (JSON-IPC)
-
-VS Code, Cursor, Neovim, JetBrains 플러그인이 DustAgent를 서브프로세스로 구동할 때 사용하는 경량 JSON 규격입니다.
-
-### Request (to STDIN)
-```json
-{
-  "instruction": "Convert callback to async/await",
-  "filePath": "src/service.ts",
-  "selection": {
-    "startLine": 12,
-    "endLine": 28,
-    "content": "function fetchUser(id, cb) { ... }"
-  }
-}
-```
-
-### Response (from STDOUT)
-```json
-{
-  "status": "success",
-  "patches": [
-    {
-      "startLine": 12,
-      "endLine": 28,
-      "original": "function fetchUser(id, cb) { ... }",
-      "modified": "async function fetchUser(id: string): Promise<User> { ... }"
-    }
-  ],
-  "tokensUsed": 342,
-  "elapsedMs": 850
-}
-```
-
----
-
-## 5. 종료 코드 (Exit Codes)
-
-| 코드 | 상태 | 의미 |
-| :---: | :--- | :--- |
-| `0` | `SUCCESS` | 패치 정상 적용 완료 |
-| `1` | `INVALID_ARGS` | 잘못된 CLI 인자 또는 존재하지 않는 파일 |
-| `2` | `LLM_API_ERROR` | LLM API 인증 실패, 쿼터 초과, 네트워크 단절 |
-| `3` | `PATCH_FAILED` | Search 블록 매칭 실패 (Fuzzy fallback까지 전부 불일치) |
-| `4` | `MCP_ERROR` | 필수 지정된 MCP 서버 구동 또는 응답 실패 |
-
----
-다음 단계: [[06_구현_로드맵_및_기술스택]]에서 기술 스택 선택과 단계별 마일스톤을 확인하십시오.
+관련 문서: [[10_dust_new_스캐폴딩]], [[11_경험_기반_자기강화]], [[12_실행_종료_및_시간_예산]], [[13_체크포인트_및_재개]], [[14_앱_패키지_및_스킬]].

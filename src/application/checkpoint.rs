@@ -26,6 +26,8 @@ pub enum CheckpointPhase {
 pub struct Checkpoint {
     pub version: u32,
     pub manifest_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_hash: Option<String>,
     pub working_directory: PathBuf,
     pub user_input: String,
     pub messages: Vec<ChatMessage>,
@@ -51,6 +53,7 @@ impl Checkpoint {
         let checkpoint = Self {
             version: 1,
             manifest_hash: manifest_hash(manifest)?,
+            resource_hash: None,
             working_directory: std::env::current_dir()?.canonicalize()?,
             user_input: user_input.into(),
             messages,
@@ -74,6 +77,12 @@ impl Checkpoint {
             .unwrap_or("You are a helpful specialized assistant.");
         if self.messages.first().and_then(|m| m.content.as_deref()) != Some(prompt) {
             return Err(invalid("system prompt changed"));
+        }
+        Ok(())
+    }
+    pub fn validate_resources(&self, hash: Option<&str>) -> Result<()> {
+        if self.resource_hash.as_deref() != hash {
+            return Err(invalid("package or skill contents changed"));
         }
         Ok(())
     }

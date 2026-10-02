@@ -157,6 +157,8 @@ impl McpClient for MockMcpClient {
 #[tokio::test]
 async fn test_single_shot_execution_without_tools() {
     let manifest = AppManifest {
+        package: None,
+        skills: Vec::new(),
         schema: Some("dustagent/app-v1".to_string()),
         name: Some("summarizer".to_string()),
         description: Some("Concise text summarizer".to_string()),
@@ -209,6 +211,8 @@ async fn test_single_shot_execution_without_tools() {
 #[tokio::test]
 async fn test_multiturn_tool_execution() {
     let manifest = AppManifest {
+        package: None,
+        skills: Vec::new(),
         schema: Some("dustagent/app-v1".to_string()),
         name: Some("crawler".to_string()),
         description: Some("Web content extractor".to_string()),
@@ -325,6 +329,8 @@ async fn test_load_manifest_from_file_and_execute() {
 #[tokio::test]
 async fn test_tool_execution_error_handling() {
     let manifest = AppManifest {
+        package: None,
+        skills: Vec::new(),
         schema: None,
         name: Some("error_tester".to_string()),
         description: None,
@@ -369,6 +375,8 @@ async fn test_tool_execution_error_handling() {
 #[tokio::test]
 async fn test_max_turns_limit() {
     let manifest = AppManifest {
+        package: None,
+        skills: Vec::new(),
         schema: None,
         name: Some("loop_tester".to_string()),
         description: None,

@@ -52,6 +52,12 @@ enum Commands {
     /// Run a specialized application manifest
     Run(RunArgs),
 
+    /// Pack an application directory as a portable .dustpkg archive
+    Pack(PackArgs),
+
+    /// Install a local package without executing its contents
+    Install(InstallArgs),
+
     /// Direct in-place code patcher
     Patch(PatchArgs),
 
@@ -60,6 +66,21 @@ enum Commands {
 
     /// Automatically review recorded examples and improve future runs
     Learn(LearnArgs),
+}
+
+#[derive(Args, Debug)]
+struct PackArgs {
+    source: PathBuf,
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct InstallArgs {
+    source: PathBuf,
+    /// Override the installed app store (~/.dustagent/packages)
+    #[arg(long)]
+    store: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -148,7 +169,7 @@ struct PatchArgs {
 
 #[derive(Args, Debug)]
 struct NewArgs {
-    /// Agent name (saved as apps/<name>.json)
+    /// Agent name (saved as apps/<name>/app.json)
     name: String,
 
     /// Natural-language description of the agent's purpose
@@ -177,6 +198,18 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Pack(args) => artifact_exit(dustagent::application::package::pack(
+            &args.source,
+            args.output.as_deref(),
+        )),
+        Commands::Install(args) => {
+            let result = args
+                .store
+                .map(Ok)
+                .unwrap_or_else(dustagent::application::package::default_store)
+                .and_then(|store| dustagent::application::package::install(&args.source, &store));
+            artifact_exit(result)
+        }
         Commands::Learn(args) => match handle_learn(args).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
@@ -208,9 +241,38 @@ async fn main() -> ExitCode {
     }
 }
 
+fn artifact_exit(result: dustagent::Result<PathBuf>) -> ExitCode {
+    match result {
+        Ok(path) => {
+            println!("{}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("Error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
     let current_dir = std::env::current_dir()?;
     let apps_dir = current_dir.join("apps");
+    if args.name.is_empty()
+        || args.name.len() > 64
+        || !args
+            .name
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'_')
+        || args.name.starts_with('-')
+        || args.name.ends_with('-')
+        || args.name.contains("--")
+    {
+        anyhow::bail!("App name must be a lowercase slug, at most 64 characters");
+    }
+    let package_dir = apps_dir.join(&args.name);
+    if !args.stdout && package_dir.exists() {
+        anyhow::bail!("Package already exists: {}", package_dir.display());
+    }
 
     // Determine system prompt: prefer apps/scaffold.json if it exists
     let system_prompt = {
@@ -259,8 +321,16 @@ async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
         }
     })?;
 
-    // Overwrite `name` field with the provided name
+    // Keep generated output a valid manifest before creating the package directory.
+    if !json_val.is_object() {
+        anyhow::bail!("Scaffold must return a manifest JSON object");
+    }
     if let Some(obj) = json_val.as_object_mut() {
+        obj.insert(
+            "package".into(),
+            serde_json::json!({"name":args.name,"version":"0.1.0","dust_version":">=0.1.0"}),
+        );
+        obj.insert("skills".into(), serde_json::json!([]));
         obj.insert(
             "name".to_string(),
             serde_json::Value::String(args.name.clone()),
@@ -268,6 +338,7 @@ async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
     }
 
     let pretty = serde_json::to_string_pretty(&json_val)?;
+    AppManifest::from_json_str(&pretty)?;
 
     if args.stdout {
         let stdout = std::io::stdout();
@@ -276,7 +347,9 @@ async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
         handle.flush()?;
     } else {
         std::fs::create_dir_all(&apps_dir)?;
-        let out_path = apps_dir.join(format!("{}.json", args.name));
+        std::fs::create_dir(&package_dir)?;
+        std::fs::create_dir(package_dir.join("skills"))?;
+        let out_path = package_dir.join("app.json");
         std::fs::write(&out_path, format!("{pretty}\n"))?;
         eprintln!("✓ Created {}", out_path.display());
     }
@@ -286,9 +359,15 @@ async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
 
 async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
     let current_dir = std::env::current_dir()?;
-    let manifest_path = resolve_manifest_path(&args.app, &current_dir)?;
-
-    let manifest = AppManifest::from_file(&manifest_path)?;
+    let loaded_app = dustagent::application::package::load(&args.app, &current_dir)?;
+    let manifest = loaded_app.manifest.clone();
+    let catalog =
+        dustagent::application::skills::SkillCatalog::load(&loaded_app.root, &manifest.skills)?;
+    let resource_hash = dustagent::application::core::resource_hash(
+        loaded_app.digest.as_deref(),
+        &catalog,
+        !manifest.skills.is_empty(),
+    );
     let checkpoint_path = args.resume.as_ref().or(args.checkpoint.as_ref());
     let checkpoint_guard = checkpoint_path
         .map(|path| acquire_checkpoint_lease(path))
@@ -314,6 +393,7 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
         let checkpoint =
             dustagent::application::checkpoint::load(checkpoint_path.as_ref().unwrap())?;
         checkpoint.validate_for(&manifest)?;
+        checkpoint.validate_resources(resource_hash.as_deref())?;
         checkpoint.ensure_resumable()?;
         Some(checkpoint)
     } else {
@@ -349,8 +429,9 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
         anyhow::bail!("Timeouts must be between 1 and 86400000 milliseconds");
     }
     let provider = OpenAiProvider::new(model.clone())?;
-    let mut core =
-        DustCore::new(manifest.clone(), provider).with_timeouts(timeout_ms, tool_timeout_ms);
+    let mut core = DustCore::new(manifest.clone(), provider)
+        .with_timeouts(timeout_ms, tool_timeout_ms)
+        .with_app_resources(&loaded_app.root, loaded_app.digest.as_deref())?;
     if let Some(path) = &checkpoint_path {
         core = core.with_checkpoint(path);
     }
@@ -619,8 +700,8 @@ fn experience_directory(path: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 }
 
 async fn handle_learn(args: LearnArgs) -> anyhow::Result<()> {
-    let manifest =
-        AppManifest::from_file(resolve_manifest_path(&args.app, &std::env::current_dir()?)?)?;
+    let loaded_app = dustagent::application::package::load(&args.app, &std::env::current_dir()?)?;
+    let manifest = loaded_app.manifest.clone();
     let store = ExperienceStore::new(experience_directory(args.experience_dir)?);
     if args.list {
         let records: Vec<_> = store

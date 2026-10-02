@@ -39,7 +39,7 @@ Run examples from the repository root so the bundled `apps/` manifests and check
 ## Create, run, compose
 
 ```bash
-# Generate apps/summarizer.json from a task description.
+# Generate apps/summarizer/app.json and an empty skills/ directory.
 dust new summarizer "Summarize input as JSON with one summary field"
 
 # Inspect the generated manifest on stdout instead of saving it.
@@ -55,9 +55,28 @@ git diff --cached | dust run commit_gen | dust run summarizer
 
 Place options before the input text, for example `dust run summarizer --model MODEL "input"`. You can also pass a manifest path instead of an app name.
 
-`dust new` generates a manifest using the scaffold prompt; the calling agent should inspect the generated prompt and tool declarations before running it. App names resolve against the current directory and its `apps/` directory.
+`dust new` generates a manifest using the scaffold prompt; the calling agent should inspect the generated prompt and tool declarations before running it. Existing JSON apps remain supported. App names resolve against the current directory, its `apps/` directory, then the installed package store.
 
 `dust run` writes the model's final response to STDOUT and diagnostics to STDERR. The app prompt determines whether that response is text, JSON, or patch blocks. An `output_format` declaration guides use and reinforcement checks; it does not enforce a response schema during ordinary execution. Incomplete runs return a nonzero exit code and emit no raw result. Use `--json` or `--report` to retain partial responses and tool observations.
+
+## App-owned skills and portable packages
+
+```bash
+# Run source or an archive without installing it.
+dust run ./apps/coverage-reader "discovered=290 observed=100 distinct items"
+dust pack ./apps/coverage-reader
+dust run ./coverage-reader-0.1.0.dustpkg "discovered=290 observed=100 distinct items"
+
+# Installation is optional; it gives the app a reusable local name.
+dust install ./coverage-reader-0.1.0.dustpkg
+dust run coverage-reader "discovered=290 observed=100 distinct items"
+```
+
+A package contains root `app.json`, its own `skills/`, and optional README/LICENSE files. The manifest declares `package: {"name":"coverage-reader","version":"0.1.0","dust_version":">=0.1.0"}` and `skills: ["coverage"]`. Each declared skill has YAML-frontmatter `SKILL.md` plus optional `references/`, `scripts/`, and `assets/`, following the [Agent Skills directory format](https://agentskills.io/specification). Names and descriptions are shown first; `dustagent__read_skill` loads instructions or UTF-8 resource files on demand. Undeclared skills, path traversal, and symlinks are rejected. Reads are limited to 64 KiB; binaries can be bundled but cannot be read through this text tool.
+
+`.dustpkg` is a bounded tar.gz archive with root contents. Packing and installing validate declared skills and never run hooks or skill scripts. Existing destinations are not overwritten. Runtime compatibility accepts an exact `X.Y.Z` or `>=X.Y.Z`. The default store is `~/.dustagent/packages`; set `DUST_PACKAGE_HOME`, or use `install --store` with the same store when resolving installed names. Archive execution uses a private temporary directory and removes it after the run. Package content hashes bind checkpoint resume across extraction locations.
+
+Skill access restrictions apply to the native skill reader. Explicit MCP servers and checkers keep their declared capabilities; this is not a process sandbox. Their executables/dependencies must already be installed, and relative command/checker paths still resolve from the caller's working directory. `allowed-tools` metadata does not grant execution permissions. See [package and skill guide](docs/14_앱_패키지_및_스킬.md).
 
 ## Execution reports and budgets
 

@@ -45,9 +45,25 @@ impl McpServerConfig {
     }
 }
 
+/// Portable application package identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageMetadata {
+    pub name: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dust_version: Option<String>,
+}
+
 /// Agent-as-an-Application (AaaA) manifest configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AppManifest {
+    /// Distribution metadata for a directory or archive package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<PackageMetadata>,
+    /// Explicitly permitted skill folders relative to this application's skills/.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
     /// JSON Schema URI or identifier.
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
@@ -107,8 +123,20 @@ impl AppManifest {
 
     /// Deserialize an `AppManifest` from a JSON string.
     pub fn from_json_str(content: &str) -> Result<Self> {
-        serde_json::from_str(content)
-            .map_err(|e| DustError::Manifest(format!("Failed to parse manifest JSON: {e}")))
+        let manifest: Self = serde_json::from_str(content)
+            .map_err(|e| DustError::Manifest(format!("Failed to parse manifest JSON: {e}")))?;
+        manifest.validate_native_namespace()?;
+        Ok(manifest)
+    }
+
+    /// Native tool namespace cannot be replaced by a configured MCP server.
+    pub fn validate_native_namespace(&self) -> Result<()> {
+        if self.mcp_servers.contains_key("dustagent") {
+            return Err(DustError::Manifest(
+                "MCP namespace dustagent is reserved for native tools".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Serialize this manifest to a pretty-printed JSON string.
