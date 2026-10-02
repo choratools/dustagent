@@ -6,3 +6,5 @@ pub mod openai;
 pub use builtin::BuiltinToolClient;
 pub use mcp_stdio::McpStdioClient;
 pub use openai::OpenAiProvider;
+
+pub mod acp;

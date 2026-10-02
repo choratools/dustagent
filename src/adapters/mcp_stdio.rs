@@ -37,7 +37,19 @@ impl McpStdioClient {
         env: Option<&HashMap<String, String>>,
         inherit_stderr: bool,
     ) -> Result<Self> {
+        Self::spawn_in(command, args, env, inherit_stderr, None)
+    }
+    fn spawn_in(
+        command: &str,
+        args: &[String],
+        env: Option<&HashMap<String, String>>,
+        inherit_stderr: bool,
+        cwd: Option<&std::path::Path>,
+    ) -> Result<Self> {
         let mut cmd = Command::new(command);
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
         cmd.args(args);
         if let Some(env_map) = env {
             cmd.envs(env_map);
@@ -98,6 +110,17 @@ impl McpStdioClient {
         env: Option<&HashMap<String, String>>,
     ) -> Result<Self> {
         Self::new(command, args, env).await
+    }
+
+    pub async fn start_and_init_in(
+        command: &str,
+        args: &[String],
+        env: Option<&HashMap<String, String>>,
+        cwd: &std::path::Path,
+    ) -> Result<Self> {
+        let mut client = Self::spawn_in(command, args, env, false, Some(cwd))?;
+        client.initialize().await?;
+        Ok(client)
     }
 
     /// Spawns a child process from config and completes the MCP initialization handshake.

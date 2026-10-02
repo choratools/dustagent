@@ -28,6 +28,13 @@ pub struct DustCore<P: LlmProvider> {
     skills: Option<super::skills::SkillCatalog>,
     resource_hash: Option<String>,
     app_root: Option<PathBuf>,
+    working_directory: Option<PathBuf>,
+    events: Option<tokio::sync::mpsc::UnboundedSender<super::events::ExecutionEvent>>,
+    cancellation: Option<tokio::sync::watch::Receiver<bool>>,
+    session_mode: bool,
+    session_messages: Vec<ChatMessage>,
+    session_tools: Vec<ToolRecord>,
+    session_phase: CheckpointPhase,
 }
 
 impl<P: LlmProvider> DustCore<P> {
@@ -53,6 +60,13 @@ impl<P: LlmProvider> DustCore<P> {
             skills: None,
             resource_hash: None,
             app_root: None,
+            working_directory: None,
+            events: None,
+            cancellation: None,
+            session_mode: false,
+            session_messages: Vec::new(),
+            session_tools: Vec::new(),
+            session_phase: CheckpointPhase::Ready,
         }
     }
 
@@ -100,6 +114,86 @@ impl<P: LlmProvider> DustCore<P> {
         Ok(self)
     }
 
+    pub fn with_working_directory(mut self, cwd: &Path) -> Result<Self> {
+        let cwd = cwd.canonicalize()?;
+        if !cwd.is_dir() {
+            return Err(DustError::Config("Session cwd must be a directory".into()));
+        }
+        self.working_directory = Some(cwd);
+        Ok(self)
+    }
+    fn cwd(&self) -> Result<PathBuf> {
+        self.working_directory
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(std::env::current_dir)
+            .map_err(DustError::from)
+    }
+    pub fn with_events(
+        mut self,
+        events: tokio::sync::mpsc::UnboundedSender<super::events::ExecutionEvent>,
+    ) -> Self {
+        self.events = Some(events);
+        self
+    }
+    pub fn with_cancellation(mut self, cancellation: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+    fn emit(&self, event: super::events::ExecutionEvent) {
+        if let Some(events) = &self.events {
+            let _ = events.send(event);
+        }
+    }
+    pub async fn prompt_report(
+        &mut self,
+        session: &mut super::session::AgentSession,
+        input: &str,
+    ) -> ExecutionReport {
+        let binding = self.cwd().and_then(|cwd| {
+            Ok(format!(
+                "{}:{}:{}",
+                serde_json::to_string(&serde_json::to_value(&self.manifest)?)?,
+                cwd.display(),
+                self.resource_hash.as_deref().unwrap_or("")
+            ))
+        });
+        let binding = match binding {
+            Ok(binding) => binding,
+            Err(error) => return session_error(error.to_string()),
+        };
+        if session.blocked {
+            return session_error(
+                "Session is blocked after an uncertain operation or exceeded bounds".into(),
+            );
+        }
+        if session.binding.as_ref().is_some_and(|old| old != &binding) {
+            return session_error("Session app or working directory changed".into());
+        }
+        if self.checkpoint_path.is_some() {
+            return session_error("Interactive sessions do not use execution checkpoints".into());
+        }
+        self.session_mode = true;
+        self.session_messages = session.messages.clone();
+        self.session_tools = session.tool_calls.clone();
+        self.working_state = session.state.clone();
+        self.session_phase = CheckpointPhase::Ready;
+        let report = self.run_inner(input, Vec::new(), None).await;
+        session.binding = Some(binding);
+        session.messages = std::mem::take(&mut self.session_messages);
+        session.state = self.working_state.clone();
+        session.tool_calls = report.tool_calls.clone();
+        session.blocked = matches!(
+            self.session_phase,
+            CheckpointPhase::ToolInFlight
+                | CheckpointPhase::ValidationInFlight
+                | CheckpointPhase::Blocked
+        ) || !super::session::within_bounds(&session.messages);
+        self.session_mode = false;
+        self.session_tools.clear();
+        report
+    }
+
     pub fn with_checkpoint(mut self, path: impl Into<PathBuf>) -> Self {
         self.checkpoint_path = Some(path.into());
         self
@@ -113,7 +207,7 @@ impl<P: LlmProvider> DustCore<P> {
             return report;
         }
         if let Err(err) = seed
-            .validate_for(&self.manifest)
+            .validate_for_in(&self.manifest, &self.cwd().unwrap_or_default())
             .and_then(|_| seed.validate_resources(self.resource_hash.as_deref()))
             .and_then(|_| seed.ensure_resumable())
         {
@@ -135,7 +229,7 @@ impl<P: LlmProvider> DustCore<P> {
             return self.resume_report(seed).await;
         }
         if seed
-            .validate_for(&self.manifest)
+            .validate_for_in(&self.manifest, &self.cwd().unwrap_or_default())
             .and_then(|_| seed.validate_resources(self.resource_hash.as_deref()))
             .and_then(|_| seed.ensure_resumable())
             .is_err()
@@ -171,7 +265,7 @@ impl<P: LlmProvider> DustCore<P> {
     }
 
     fn persist(
-        &self,
+        &mut self,
         input: &str,
         messages: &[ChatMessage],
         report: &mut ExecutionReport,
@@ -179,6 +273,19 @@ impl<P: LlmProvider> DustCore<P> {
         started: Instant,
         prior_ms: u64,
     ) -> bool {
+        if self.session_mode {
+            self.session_messages = messages.to_vec();
+            self.session_phase = phase;
+            if !super::session::within_bounds(messages) {
+                self.session_phase = CheckpointPhase::Blocked;
+                report.stop_reason = StopReason::ExecutionError;
+                report.error = Some(
+                    "Session transcript exceeds 2048 messages or 8 MiB; no history was trimmed"
+                        .into(),
+                );
+                return false;
+            }
+        }
         if self.manifest.working_state {
             report.working_state = Some(self.working_state.clone());
         }
@@ -188,11 +295,18 @@ impl<P: LlmProvider> DustCore<P> {
         let mut snapshot = report.clone();
         snapshot.elapsed_ms =
             prior_ms.saturating_add(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
-        let result = Checkpoint::new(&self.manifest, input, messages.to_vec(), snapshot, phase)
-            .and_then(|mut cp| {
-                cp.resource_hash = self.resource_hash.clone();
-                checkpoint::save(path, &cp)
-            });
+        let result = Checkpoint::new_in(
+            &self.manifest,
+            input,
+            messages.to_vec(),
+            snapshot,
+            phase,
+            &self.cwd().unwrap_or_default(),
+        )
+        .and_then(|mut cp| {
+            cp.resource_hash = self.resource_hash.clone();
+            checkpoint::save(path, &cp)
+        });
         if let Err(err) = result {
             report.stop_reason = StopReason::ExecutionError;
             report.error = Some(format!("Checkpoint save failed: {err}"));
@@ -229,15 +343,25 @@ impl<P: LlmProvider> DustCore<P> {
     /// Starts ONLY the scoped MCP servers declared in the application manifest.
     pub async fn init_scoped_mcp(&mut self) -> Result<()> {
         self.manifest.validate_native_namespace()?;
+        self.mcp_clients
+            .entry("dustagent".into())
+            .or_insert_with(|| Box::new(BuiltinToolClient::new()));
         let deadline = Instant::now() + Duration::from_millis(self.timeout_ms.min(86_400_000));
+        let cwd = self.cwd()?;
         for (name, config) in &self.manifest.mcp_servers {
             if Instant::now() >= deadline {
                 return Err(DustError::Mcp("MCP startup budget exhausted".into()));
             }
-            match timeout_at(
+            match wait_until(
                 (Instant::now() + Duration::from_millis(self.tool_timeout_ms.min(86_400_000)))
                     .min(deadline),
-                McpStdioClient::start_and_init(&config.command, &config.args, config.env.as_ref()),
+                self.cancellation.clone(),
+                McpStdioClient::start_and_init_in(
+                    &config.command,
+                    &config.args,
+                    config.env.as_ref(),
+                    &cwd,
+                ),
             )
             .await
             {
@@ -249,6 +373,9 @@ impl<P: LlmProvider> DustCore<P> {
                         .push(format!("Failed to launch MCP server {name}: {err}"));
                     eprintln!("[dustagent] Warning: Failed to launch MCP server '{name}': {err}");
                     warn!("Failed to launch MCP server '{name}': {err}");
+                }
+                Err(WaitError::Cancelled) => {
+                    return Err(DustError::Mcp("MCP initialization cancelled".into()));
                 }
                 Err(_) => self.lifecycle_warnings.push(format!(
                     "MCP server initialization deadline exceeded: {name}"
@@ -484,7 +611,11 @@ impl<P: LlmProvider> DustCore<P> {
     ) -> ExecutionReport {
         let started = Instant::now();
         let mut report = seed.map(|cp| cp.report.clone()).unwrap_or_default();
-        self.working_state = report.working_state.clone().unwrap_or_default();
+        if self.session_mode {
+            report.tool_calls = self.session_tools.clone();
+        } else {
+            self.working_state = report.working_state.clone().unwrap_or_default();
+        }
         if self.manifest.working_state {
             report.working_state = Some(self.working_state.clone());
         }
@@ -561,25 +692,43 @@ impl<P: LlmProvider> DustCore<P> {
         messages.push(ChatMessage::user(user_input));
         if let Some(seed) = seed {
             messages = seed.messages.clone();
+        } else if self.session_mode && !self.session_messages.is_empty() {
+            messages = self.session_messages.clone();
+            messages.push(ChatMessage::user(user_input));
         }
         if !self.persist(user_input, &messages, &mut report, phase, started, prior_ms) {
             return finish_with_prior(report, started, prior_ms);
         }
-        let tools = match timeout_at(deadline, self.gather_mcp_tools()).await {
-            Ok(Ok(tools)) => tools,
-            Ok(Err(err)) => {
-                report.error = Some(err.to_string());
-                stop!(report, &messages);
-            }
-            Err(_) => {
-                self.mcp_clients.clear();
-                report.stop_reason = StopReason::TimeLimit;
-                report
-                    .warnings
-                    .push("Discovery timed out; scoped clients discarded".into());
-                stop!(report, &messages);
-            }
-        };
+        let tools =
+            match wait_until(deadline, self.cancellation.clone(), self.gather_mcp_tools()).await {
+                Ok(Ok(tools)) => tools,
+                Ok(Err(err)) => {
+                    report.error = Some(err.to_string());
+                    stop!(report, &messages);
+                }
+                Err(WaitError::Cancelled) => {
+                    self.mcp_clients.clear();
+                    if self.session_mode {
+                        phase = CheckpointPhase::Blocked;
+                    }
+                    report
+                        .warnings
+                        .push("Cancelled tool discovery; scoped clients discarded".into());
+                    report.stop_reason = StopReason::Cancelled;
+                    stop!(report, &messages);
+                }
+                Err(_) => {
+                    self.mcp_clients.clear();
+                    if self.session_mode {
+                        phase = CheckpointPhase::Blocked;
+                    }
+                    report.stop_reason = StopReason::TimeLimit;
+                    report
+                        .warnings
+                        .push("Discovery timed out; scoped clients discarded".into());
+                    stop!(report, &messages);
+                }
+            };
         report.warnings.append(&mut self.lifecycle_warnings);
         for additional_turn in 1..=self.max_turns {
             let turn = prior_turns.saturating_add(additional_turn);
@@ -602,8 +751,9 @@ impl<P: LlmProvider> DustCore<P> {
             };
             let mut retry_index = 0;
             let resp = loop {
-                match timeout_at(
+                match wait_until(
                     deadline,
+                    self.cancellation.clone(),
                     self.provider.chat(
                         &messages,
                         if tools.is_empty() { None } else { Some(&tools) },
@@ -619,7 +769,12 @@ impl<P: LlmProvider> DustCore<P> {
                         let delay = retry_config.delay(retry_index);
                         retry_index += 1;
                         let wait_started = Instant::now();
-                        let waiting = timeout_at(deadline, tokio::time::sleep(delay)).await;
+                        let waiting = wait_until(
+                            deadline,
+                            self.cancellation.clone(),
+                            tokio::time::sleep(delay),
+                        )
+                        .await;
                         report.provider_retries.push(super::execution::RetryRecord {
                             turn,
                             attempt: retry_index,
@@ -632,7 +787,11 @@ impl<P: LlmProvider> DustCore<P> {
                             turn_record.error =
                                 Some("Budget exhausted during provider retry delay".into());
                             report.turns.push(turn_record);
-                            report.stop_reason = StopReason::TimeLimit;
+                            report.stop_reason = if matches!(waiting, Err(WaitError::Cancelled)) {
+                                StopReason::Cancelled
+                            } else {
+                                StopReason::TimeLimit
+                            };
                             stop!(report, &messages);
                         }
                         // Same transcript; no tool dispatch occurred for this failed request.
@@ -644,6 +803,13 @@ impl<P: LlmProvider> DustCore<P> {
                         report.error = Some(err.to_string());
                         stop!(report, &messages);
                     }
+                    Err(WaitError::Cancelled) => {
+                        turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
+                        turn_record.error = Some("Model request cancelled".into());
+                        report.turns.push(turn_record);
+                        report.stop_reason = StopReason::Cancelled;
+                        stop!(report, &messages);
+                    }
                     Err(_) => {
                         turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
                         turn_record.error = Some("Provider deadline exceeded".into());
@@ -653,6 +819,13 @@ impl<P: LlmProvider> DustCore<P> {
                     }
                 }
             };
+            if let Some(content) = &resp.content
+                && !content.is_empty()
+            {
+                self.emit(super::events::ExecutionEvent::AssistantMessage {
+                    content: content.clone(),
+                });
+            }
             turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
             turn_record.tool_call_count = resp.tool_calls.as_ref().map_or(0, Vec::len);
             if let Some(content) = &resp.content {
@@ -705,14 +878,16 @@ impl<P: LlmProvider> DustCore<P> {
                     if !self.persist(user_input, &messages, &mut report, phase, started, prior_ms) {
                         return finish_with_prior(report, started, prior_ms);
                     }
-                    match timeout_at(
+                    match wait_until(
                         deadline,
-                        super::validation::validate_execution(
+                        self.cancellation.clone(),
+                        super::validation::validate_execution_in(
                             &config,
                             user_input,
                             report.output.as_deref().unwrap_or(""),
                             &report.tool_calls,
                             &self.working_state,
+                            &self.cwd().unwrap_or_default(),
                         ),
                     )
                     .await
@@ -753,6 +928,11 @@ impl<P: LlmProvider> DustCore<P> {
                         Ok(Err(err)) => {
                             report.stop_reason = StopReason::ExecutionError;
                             report.error = Some(format!("Validation configuration: {err}"));
+                        }
+                        Err(WaitError::Cancelled) => {
+                            report.stop_reason = StopReason::Cancelled;
+                            report.error =
+                                Some("Validation cancelled; checker outcome is unknown".into());
                         }
                         Err(_) => {
                             report.stop_reason = StopReason::TimeLimit;
@@ -800,6 +980,14 @@ impl<P: LlmProvider> DustCore<P> {
                             "Tool {} received invalid arguments",
                             tc.function_name
                         ));
+                        self.emit(super::events::ExecutionEvent::ToolStarted {
+                            call_id: tc.id.clone(),
+                            name: tc.function_name.clone(),
+                            arguments: Value::String(tc.arguments.clone()),
+                        });
+                        self.emit(super::events::ExecutionEvent::ToolFinished {
+                            record: record.clone(),
+                        });
                         report.tool_calls.push(record);
                         continue;
                     }
@@ -810,37 +998,51 @@ impl<P: LlmProvider> DustCore<P> {
                 if !self.persist(user_input, &messages, &mut report, phase, started, prior_ms) {
                     return finish_with_prior(report, started, prior_ms);
                 }
-                let output =
-                    match timeout_at(tool_deadline, self.execute_tool(&tc.function_name, args))
-                        .await
-                    {
-                        Ok(Ok(output)) => {
-                            if serde_json::from_str::<Value>(&output)
-                                .ok()
-                                .and_then(|v| v.get("isError").and_then(Value::as_bool))
-                                == Some(true)
-                            {
-                                record.status = ToolStatus::Failed;
-                                record.error = Some("MCP tool reported isError".into());
-                            }
-                            Some(output)
-                        }
-                        Ok(Err(err)) => {
+                self.emit(super::events::ExecutionEvent::ToolStarted {
+                    call_id: tc.id.clone(),
+                    name: tc.function_name.clone(),
+                    arguments: args.clone(),
+                });
+                let output = match wait_until(
+                    tool_deadline,
+                    self.cancellation.clone(),
+                    self.execute_tool(&tc.function_name, args),
+                )
+                .await
+                {
+                    Ok(Ok(output)) => {
+                        if serde_json::from_str::<Value>(&output)
+                            .ok()
+                            .and_then(|v| v.get("isError").and_then(Value::as_bool))
+                            == Some(true)
+                        {
                             record.status = ToolStatus::Failed;
-                            record.error = Some(err.to_string());
-                            None
+                            record.error = Some("MCP tool reported isError".into());
                         }
-                        Err(_) => {
-                            record.status = ToolStatus::TimedOut;
-                            record.error = Some("Tool deadline exceeded".into());
-                            report.stop_reason = if tool_deadline == deadline {
-                                StopReason::TimeLimit
-                            } else {
-                                StopReason::ToolTimeout
-                            };
-                            None
-                        }
-                    };
+                        Some(output)
+                    }
+                    Ok(Err(err)) => {
+                        record.status = ToolStatus::Failed;
+                        record.error = Some(err.to_string());
+                        None
+                    }
+                    Err(WaitError::Cancelled) => {
+                        record.status = ToolStatus::TimedOut;
+                        record.error = Some("Tool cancelled; remote outcome is unknown".into());
+                        report.stop_reason = StopReason::Cancelled;
+                        None
+                    }
+                    Err(_) => {
+                        record.status = ToolStatus::TimedOut;
+                        record.error = Some("Tool deadline exceeded".into());
+                        report.stop_reason = if tool_deadline == deadline {
+                            StopReason::TimeLimit
+                        } else {
+                            StopReason::ToolTimeout
+                        };
+                        None
+                    }
+                };
                 record.elapsed_ms = call_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
                 if let Some(output) = output {
                     let cap = 65_536usize.min(1_048_576usize.saturating_sub(retained));
@@ -866,7 +1068,7 @@ impl<P: LlmProvider> DustCore<P> {
                         serde_json::json!({"error": record.error}).to_string(),
                     ));
                 }
-                let unknown_outcome = self.checkpoint_path.is_some()
+                let unknown_outcome = (self.checkpoint_path.is_some() || self.session_mode)
                     && record.status == ToolStatus::Failed
                     && record.output.is_none();
                 let timed_out = record.status == ToolStatus::TimedOut;
@@ -875,6 +1077,9 @@ impl<P: LlmProvider> DustCore<P> {
                         .warnings
                         .push(format!("Tool {}: {:?}", record.name, record.status));
                 }
+                self.emit(super::events::ExecutionEvent::ToolFinished {
+                    record: record.clone(),
+                });
                 report.tool_calls.push(record);
                 if unknown_outcome {
                     phase = CheckpointPhase::Blocked;
@@ -883,7 +1088,7 @@ impl<P: LlmProvider> DustCore<P> {
                         .tool_calls
                         .last()
                         .and_then(|record| record.error.clone());
-                    report.warnings.push(format!("Tool {} failed without an observed response; its remote outcome is unknown. Checkpoint resume is blocked.", tc.function_name));
+                    report.warnings.push(format!("Tool {} failed without an observed response; its remote outcome is unknown. Checkpoint resume and session continuation are blocked.", tc.function_name));
                     if let Some((server, _)) = tc.function_name.split_once("__")
                         && let Some(mut client) = self.mcp_clients.remove(server)
                     {
@@ -892,7 +1097,12 @@ impl<P: LlmProvider> DustCore<P> {
                     stop!(report, &messages);
                 }
                 if timed_out {
-                    report.warnings.push(format!("Tool {} timed out; its remote outcome is unknown. No automatic retry was attempted.", tc.function_name));
+                    let interruption = if report.stop_reason == StopReason::Cancelled {
+                        "was cancelled"
+                    } else {
+                        "timed out"
+                    };
+                    report.warnings.push(format!("Tool {} {interruption}; its remote outcome is unknown. No automatic retry was attempted.", tc.function_name));
                     // A cancelled stdio request can leave unread responses; discard the client.
                     if let Some((server, _)) = tc.function_name.split_once("__")
                         && let Some(mut client) = self.mcp_clients.remove(server)
@@ -970,4 +1180,40 @@ pub fn resource_hash(
             .as_bytes()
         )
     ))
+}
+
+fn session_error(error: String) -> ExecutionReport {
+    ExecutionReport {
+        error: Some(error),
+        ..ExecutionReport::default()
+    }
+}
+#[derive(Debug)]
+enum WaitError {
+    Deadline,
+    Cancelled,
+}
+async fn wait_until<T>(
+    deadline: Instant,
+    cancellation: Option<tokio::sync::watch::Receiver<bool>>,
+    future: impl std::future::Future<Output = T>,
+) -> std::result::Result<T, WaitError> {
+    tokio::select! {
+        biased;
+        _ = cancelled(cancellation) => Err(WaitError::Cancelled),
+        result = timeout_at(deadline,future) => result.map_err(|_| WaitError::Deadline),
+    }
+}
+async fn cancelled(cancellation: Option<tokio::sync::watch::Receiver<bool>>) {
+    if let Some(mut receiver) = cancellation {
+        loop {
+            if *receiver.borrow_and_update() {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+    std::future::pending::<()>().await;
 }

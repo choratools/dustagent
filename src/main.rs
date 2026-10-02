@@ -52,6 +52,9 @@ enum Commands {
     /// Run a specialized application manifest
     Run(RunArgs),
 
+    /// Serve an application to ACP clients over stdio
+    Acp(AcpArgs),
+
     /// Pack an application directory as a portable .dustpkg archive
     Pack(PackArgs),
 
@@ -66,6 +69,20 @@ enum Commands {
 
     /// Automatically review recorded examples and improve future runs
     Learn(LearnArgs),
+}
+
+#[derive(Args, Debug)]
+struct AcpArgs {
+    /// App name, JSON manifest, directory, or .dustpkg path
+    app: String,
+    #[arg(short, long)]
+    model: Option<String>,
+    #[arg(long)]
+    max_turns: Option<usize>,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400_000))]
+    timeout_ms: Option<u64>,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400_000))]
+    tool_timeout_ms: Option<u64>,
 }
 
 #[derive(Args, Debug)]
@@ -198,6 +215,22 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Acp(args) => {
+            let options = dustagent::adapters::acp::AcpOptions {
+                app: args.app,
+                model: args.model,
+                max_turns: args.max_turns,
+                timeout_ms: args.timeout_ms,
+                tool_timeout_ms: args.tool_timeout_ms,
+            };
+            match dustagent::adapters::acp::serve_stdio(options).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("Error: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Commands::Pack(args) => artifact_exit(dustagent::application::package::pack(
             &args.source,
             args.output.as_deref(),
@@ -540,6 +573,7 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
     }
     let code = match report.stop_reason {
         StopReason::Completed => 0,
+        StopReason::Cancelled => 7,
         StopReason::TurnLimit => 2,
         StopReason::TimeLimit | StopReason::ToolTimeout => 3,
         StopReason::EmptyResponse => 4,

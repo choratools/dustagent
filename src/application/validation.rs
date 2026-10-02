@@ -132,17 +132,48 @@ pub async fn validate_execution(
     tool_calls: &[super::execution::ToolRecord],
     state: &super::state::WorkingState,
 ) -> Result<ValidationEvidence> {
+    validate_execution_in(
+        config,
+        input,
+        output,
+        tool_calls,
+        state,
+        &std::env::current_dir()?,
+    )
+    .await
+}
+
+pub async fn validate_execution_in(
+    config: &ValidationConfig,
+    input: &str,
+    output: &str,
+    tool_calls: &[super::execution::ToolRecord],
+    state: &super::state::WorkingState,
+    cwd: &std::path::Path,
+) -> Result<ValidationEvidence> {
     let payload = if config.mode == ValidationMode::Feedback {
         serde_json::json!({"input": input, "output": output, "tool_calls": tool_calls, "state": state})
     } else {
         serde_json::json!({"input": input, "output": output})
     };
-    run(config, payload).await
+    run_in(config, payload, Some(cwd)).await
 }
 
 async fn run(config: &ValidationConfig, payload: serde_json::Value) -> Result<ValidationEvidence> {
+    run_in(config, payload, None).await
+}
+
+async fn run_in(
+    config: &ValidationConfig,
+    payload: serde_json::Value,
+    cwd: Option<&std::path::Path>,
+) -> Result<ValidationEvidence> {
     config.validate()?;
-    let mut child = match Command::new(&config.command)
+    let mut command = Command::new(&config.command);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = match command
         .args(&config.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

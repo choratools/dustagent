@@ -50,20 +50,40 @@ impl Checkpoint {
         report: ExecutionReport,
         phase: CheckpointPhase,
     ) -> Result<Self> {
+        Self::new_in(
+            manifest,
+            user_input,
+            messages,
+            report,
+            phase,
+            &std::env::current_dir()?,
+        )
+    }
+    pub fn new_in(
+        manifest: &AppManifest,
+        user_input: &str,
+        messages: Vec<ChatMessage>,
+        report: ExecutionReport,
+        phase: CheckpointPhase,
+        cwd: &Path,
+    ) -> Result<Self> {
         let checkpoint = Self {
             version: 1,
             manifest_hash: manifest_hash(manifest)?,
             resource_hash: None,
-            working_directory: std::env::current_dir()?.canonicalize()?,
+            working_directory: cwd.canonicalize()?,
             user_input: user_input.into(),
             messages,
             report,
             phase,
         };
-        checkpoint.validate_for(manifest)?;
+        checkpoint.validate_for_in(manifest, cwd)?;
         Ok(checkpoint)
     }
     pub fn validate_for(&self, manifest: &AppManifest) -> Result<()> {
+        self.validate_for_in(manifest, &std::env::current_dir()?)
+    }
+    pub fn validate_for_in(&self, manifest: &AppManifest, cwd: &Path) -> Result<()> {
         self.validate_protocol()?;
         if let Some(state) = &self.report.working_state {
             state.validate()?;
@@ -71,7 +91,7 @@ impl Checkpoint {
         if self.manifest_hash != manifest_hash(manifest)? {
             return Err(invalid("manifest changed"));
         }
-        if self.working_directory != std::env::current_dir()?.canonicalize()? {
+        if self.working_directory != cwd.canonicalize()? {
             return Err(invalid("working directory changed"));
         }
         let prompt = manifest

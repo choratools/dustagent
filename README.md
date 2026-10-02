@@ -102,6 +102,7 @@ DustAgent provides these individual commands. A single command that automaticall
 | Command | Purpose |
 | :--- | :--- |
 | `dust run <APP> [INPUT...]` | Run an app by name, JSON manifest path, package directory, or `.dustpkg` path |
+| `dust acp <APP>` | Serve an app through ACP v1 over stdio for compatible clients |
 | `dust new <NAME> <DESCRIPTION>` | Generate `apps/<NAME>/app.json` and an empty `skills/` directory using an LLM |
 | `dust pack <SOURCE>` | Pack an application directory into a `.dustpkg` archive |
 | `dust install <SOURCE>` | Install a local directory or `.dustpkg` package |
@@ -135,6 +136,19 @@ git diff --cached | dust run commit_gen
 | `--experience-dir PATH` | Override the experience directory; implies `--experience` |
 
 Place options before input text. Without input arguments, `run` reads STDIN. `--resume` accepts no new input and cannot be combined with `--checkpoint`. Inspect the exit code even when using `--json`.
+
+### ACP
+
+```bash
+dust acp ./apps/coverage-reader
+dust acp ./coverage-reader-0.1.0.dustpkg --model MODEL --timeout-ms 120000
+```
+
+Configure an ACP client to launch `dust` with arguments `["acp", "/absolute/path/to/app"]` and the same `OPENAI_API_KEY` / optional `OPENAI_BASE_URL` used by `run`. `APP` accepts an app name, manifest, directory, or archive; installation is optional. Options are `--model`, `--max-turns`, `--timeout-ms`, and `--tool-timeout-ms`.
+
+STDIN/STDOUT carry newline-delimited JSON-RPC only. Each session preserves conversation, working state, and tool evidence, and uses its own client-supplied working directory. Model turns and time budgets reset per prompt. Tool progress and assistant messages are emitted as `session/update`; model text is delivered after each model response, rather than token by token.
+
+Cancellation interrupts active work. A cancelled model request permits follow-up; an uncertain tool/checker outcome blocks further execution in that session. Create a new session after checking the external outcome. App-owned skills and declared MCP servers remain the capability boundary: client MCP configuration cannot add tools. Text and resource links are supported; links are passed as metadata without fetching. Session reload, image/audio input, client filesystem/terminal calls, and interactive authentication are not implemented. See [ACP interface](docs/16_ACP_인터페이스.md) for protocol details and limits.
 
 ### New
 
@@ -231,6 +245,7 @@ Reports distinguish final responses from tool observations. They contain `stop_r
 | `4` | `empty_response` | Model ended without nonempty final content |
 | `5` | `execution_error` | Execution failed, such as a provider request error |
 | `6` | `validation_failed` | Configured checker rejected the output |
+| `7` | `cancelled` | Library cancellation; ACP returns a cancelled prompt response without exiting the process |
 
 Without `--json`, only completed runs emit task output on STDOUT. With `--json`, failed runs also emit their report; callers must still inspect the exit code. `--report` saves the report atomically with owner-only permissions on Unix. Reports can include sensitive task and tool data.
 

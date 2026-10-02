@@ -18,6 +18,7 @@ aliases: [CLI 스펙, 인터페이스 명세]
 | 명령 | 입력 | 산출 |
 | --- | --- | --- |
 | dust run APP [OPTIONS] [INPUT...] | 앱 이름, JSON 경로, 패키지 디렉터리 또는 .dustpkg | 완료한 최종 응답 또는 --json 실행 보고서 |
+| dust acp APP [OPTIONS] | 앱 이름·매니페스트·디렉터리·.dustpkg | ACP v1 stdio JSON-RPC 세션 |
 | dust new NAME DESCRIPTION | 자연어 작업 설명 | apps/NAME/app.json 및 빈 skills/; --stdout이면 JSON만 출력 |
 | dust pack SOURCE [-o OUTPUT] | app.json이 있는 패키지 디렉터리 | .dustpkg 생성 후 경로 출력 |
 | dust install SOURCE [--store STORE] | 로컬 디렉터리 또는 .dustpkg | 설치 후 디렉터리 경로 출력 |
@@ -58,6 +59,7 @@ run은 INPUT이 없으면 STDIN을 읽는다. 옵션은 입력 문장 앞에 둔
 | 4 | 모델의 빈 최종 응답 |
 | 5 | 실행 오류 |
 | 6 | 결과 검사 실패 |
+| 7 | 라이브러리 실행 취소; ACP에서는 prompt 응답으로 전달 |
 
 ## 패키지와 skill
 
@@ -76,6 +78,6 @@ pack의 출력 부모 디렉터리는 미리 있어야 하며 출력은 원본 �
 dust patch --file src/app.py --range 40:60 --dry-run "Convert this handler to async"
 ```
 
-patch는 지시문을 명령 인자로 받는다. --range/-r는 선택적 줄 범위이며 --dry-run은 모델이 만든 블록을 출력하고 파일을 바꾸지 않는다. --diff, --pipe, --mcp 같은 초기 설계 플래그와 IDE JSON-IPC 전용 프로토콜은 현재 구현하지 않았다. IDE는 run의 STDIN/STDOUT 또는 --json 보고서를 사용할 수 있다.
+patch는 지시문을 명령 인자로 받는다. --range/-r는 선택적 줄 범위이며 --dry-run은 모델이 만든 블록을 출력하고 파일을 바꾸지 않는다. --diff, --pipe, --mcp 같은 초기 설계 플래그와 IDE JSON-IPC 전용 프로토콜은 현재 구현하지 않았다. IDE는 run의 STDIN/STDOUT, --json 보고서 또는 ACP 클라이언트로 dust acp를 사용할 수 있다. ACP 계약은 [[16_ACP_인터페이스]]를 참고한다.
 
 관련 문서: [[10_dust_new_스캐폴딩]], [[11_경험_기반_자기강화]], [[12_실행_종료_및_시간_예산]], [[13_체크포인트_및_재개]], [[14_앱_패키지_및_스킬]].
