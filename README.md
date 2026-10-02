@@ -27,12 +27,18 @@ git clone https://github.com/choratools/dustagent.git
 cd dustagent
 cargo install --path . --locked
 
-export OPENAI_API_KEY="your-api-key"
+# Default: reuse your existing file-backed Codex login.
+codex login
+
+# Optional: use an API key instead.
+# export OPENAI_API_KEY="your-api-key"
 # For another OpenAI-compatible server:
 # export OPENAI_BASE_URL="http://localhost:30000/v1"
 ```
 
-`OPENAI_BASE_URL` defaults to `https://api.openai.com/v1`. The adapter requires `OPENAI_API_KEY`, including for local servers; use a placeholder only if your local server accepts one. Use `--model` to select the model served by your endpoint. `run` and `learn` otherwise use the app's `default_model`, falling back to `gpt-4o-mini`; `new` defaults to `gpt-4o-mini`.
+CLI commands automatically select the model connection. Explicit `OPENAI_API_KEY` uses the OpenAI-compatible API; `OPENAI_BASE_URL` overrides its address and requires a key, including a placeholder accepted by a local server. With neither variable set, Dust reads `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`): a cached API key uses the OpenAI API, while a ChatGPT login uses the Codex backend directly. No Codex subprocess or proxy is started. Keyring-only login is not supported.
+
+`--model` overrides the app's `default_model`; without either, the API default is `gpt-4o-mini` and the Codex default is `gpt-6.1-sol`. Existing manifests naming API/local-only models need a Codex-compatible `--model` or a manifest update. Account access and usage limits still apply. See [Codex authentication](docs/17_Codex_인증_및_모델_연결.md) for token refresh and compatibility limits.
 
 Run examples from the repository root so the bundled `apps/` manifests and checker paths resolve. External MCP tools require their declared commands, such as `uvx` or `npx`, to be installed separately.
 
@@ -144,7 +150,7 @@ dust acp ./apps/coverage-reader
 dust acp ./coverage-reader-0.1.0.dustpkg --model MODEL --timeout-ms 120000
 ```
 
-Configure an ACP client to launch `dust` with arguments `["acp", "/absolute/path/to/app"]` and the same `OPENAI_API_KEY` / optional `OPENAI_BASE_URL` used by `run`. `APP` accepts an app name, manifest, directory, or archive; installation is optional. Options are `--model`, `--max-turns`, `--timeout-ms`, and `--tool-timeout-ms`.
+Configure an ACP client to launch `dust` with arguments `["acp", "/absolute/path/to/app"]` and the same API environment or file-backed Codex login used by `run`. `APP` accepts an app name, manifest, directory, or archive; installation is optional. Options are `--model`, `--max-turns`, `--timeout-ms`, and `--tool-timeout-ms`.
 
 STDIN/STDOUT carry newline-delimited JSON-RPC only. Each session preserves conversation, working state, and tool evidence, and uses its own client-supplied working directory. Model turns and time budgets reset per prompt. Tool progress and assistant messages are emitted as `session/update`; model text is delivered after each model response, rather than token by token.
 

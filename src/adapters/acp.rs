@@ -1,6 +1,6 @@
 //! ACP v1 stdio adapter. Client inputs never grant additional application tools.
 use crate::{
-    DustCore, DustError, OpenAiProvider, Result,
+    AutoProvider, DustCore, DustError, Result,
     application::{
         events::ExecutionEvent,
         execution::{ExecutionReport, StopReason, ToolStatus},
@@ -31,7 +31,7 @@ pub struct AcpOptions {
     pub timeout_ms: Option<u64>,
     pub tool_timeout_ms: Option<u64>,
 }
-type Core = DustCore<OpenAiProvider>;
+type Core = DustCore<AutoProvider>;
 struct Session {
     core: Option<Core>,
     history: Option<AgentSession>,
@@ -335,8 +335,8 @@ where
                     else { match session_directory(&params,&app) {
                         Err(message) => error(id,-32602,message),
                         Ok(cwd) => {
-                            let model = options.model.clone().or_else(|| app.manifest.default_model.clone()).unwrap_or_else(|| "gpt-4o-mini".into());
-                            let core = OpenAiProvider::new(model).and_then(|provider| DustCore::new(app.manifest.clone(),provider).with_timeouts(total,tool).with_app_resources(&app.root,app.digest.as_deref())).and_then(|core| core.with_working_directory(&cwd));
+                            let model = options.model.clone().or_else(|| app.manifest.default_model.clone());
+                            let core = AutoProvider::new(model).and_then(|provider| DustCore::new(app.manifest.clone(),provider).with_timeouts(total,tool).with_app_resources(&app.root,app.digest.as_deref())).and_then(|core| core.with_working_directory(&cwd));
                             match core { Err(e) => error(id,-32000,e.to_string()), Ok(mut core) => { if let Some(turns) = options.max_turns { core = core.with_max_turns(turns); } next_session += 1; let sid = format!("dust-{next_session}"); let (cancel,_) = watch::channel(false); sessions.insert(sid.clone(),Session{core:Some(core),history:Some(AgentSession::new()),cancel,ready:false}); result(id,json!({"sessionId":sid})) } }
                         }
                     } }

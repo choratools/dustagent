@@ -34,7 +34,7 @@ dust run ./coverage-reader-0.1.0.dustpkg "discovered=290 observed=100"
 git diff --cached | dust run commit_gen
 ```
 
-run은 INPUT이 없으면 STDIN을 읽는다. 옵션은 입력 문장 앞에 둔다. --resume은 원래 입력을 체크포인트에서 읽으며 새 입력을 허용하지 않는다. 모델은 --model/-m으로 지정한다. API 설정은 OPENAI_API_KEY와 선택적 OPENAI_BASE_URL을 사용한다.
+run은 INPUT이 없으면 STDIN을 읽는다. 옵션은 입력 문장 앞에 둔다. --resume은 원래 입력을 체크포인트에서 읽으며 새 입력을 허용하지 않는다. 모델은 --model/-m으로 지정한다. API 설정은 OPENAI_API_KEY와 선택적 OPENAI_BASE_URL을 사용한다. 둘 다 없으면 Codex 파일 인증 캐시를 읽는다. 자세한 선택·갱신 계약은 [[17_Codex_인증_및_모델_연결]]을 참고한다.
 
 | run 옵션 | 의미 |
 | --- | --- |

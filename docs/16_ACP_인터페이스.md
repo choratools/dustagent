@@ -17,7 +17,7 @@ APP은 이름·JSON 매니페스트·패키지 디렉터리·아카이브를 받
 {"command":"/absolute/path/to/dust","args":["acp","/absolute/path/to/app"]}
 ```
 
-프로세스 환경에 OPENAI_API_KEY와 선택적 OPENAI_BASE_URL을 전달한다. 모델은 앱 설정 또는 --model을 사용한다. STDIN/STDOUT은 UTF-8 한 줄 JSON-RPC 전용이다. 진단은 STDERR로 나간다. 사람이 prompt 문자열을 STDIN에 바로 넣는 run 방식과 구분한다.
+프로세스 환경에 OPENAI_API_KEY와 선택적 OPENAI_BASE_URL을 전달하거나, 둘 다 생략하여 기존 Codex 파일 인증을 사용한다. 모델은 앱 설정 또는 --model을 사용한다. STDIN/STDOUT은 UTF-8 한 줄 JSON-RPC 전용이다. 진단은 STDERR로 나간다. 사람이 prompt 문자열을 STDIN에 바로 넣는 run 방식과 구분한다.
 
 ## 세션과 실행
 

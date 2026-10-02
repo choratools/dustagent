@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
+use dustagent::AutoProvider;
 use dustagent::adapters::fuzzy_patch::FuzzyPatcher;
-use dustagent::adapters::openai::OpenAiProvider;
 use dustagent::application::ExperienceStore;
 use dustagent::application::core::DustCore;
 use dustagent::domain::manifest::{AppManifest, resolve_manifest_path};
@@ -320,18 +320,19 @@ async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
         }
     };
 
-    let model = args
-        .model
-        .clone()
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+    let model = args.model.clone();
 
-    let provider = OpenAiProvider::new(&model)?;
+    let provider = AutoProvider::new(model)?;
 
     let messages = vec![
-        ChatMessage::system(&system_prompt),
+        ChatMessage::system(format!(
+            "{system_prompt}\nSet default_model to {} for the selected provider.",
+            serde_json::to_string(provider.model())?
+        )),
         ChatMessage::user(format!(
-            "Generate a DustAgent manifest for: {}",
-            args.description
+            "Generate a DustAgent manifest for: {}. Use default_model={} for this provider.",
+            args.description,
+            provider.model()
         )),
     ];
 
@@ -448,10 +449,7 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
         anyhow::bail!("Input was empty.");
     }
 
-    let model = args
-        .model
-        .or_else(|| manifest.default_model.clone())
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+    let model = args.model.or_else(|| manifest.default_model.clone());
 
     let timeout_ms = args.timeout_ms.or(manifest.timeout_ms).unwrap_or(300_000);
     let tool_timeout_ms = args
@@ -461,7 +459,7 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
     if !(1..=86_400_000).contains(&timeout_ms) || !(1..=86_400_000).contains(&tool_timeout_ms) {
         anyhow::bail!("Timeouts must be between 1 and 86400000 milliseconds");
     }
-    let provider = OpenAiProvider::new(model.clone())?;
+    let provider = AutoProvider::new(model.clone())?;
     let mut core = DustCore::new(manifest.clone(), provider)
         .with_timeouts(timeout_ms, tool_timeout_ms)
         .with_app_resources(&loaded_app.root, loaded_app.digest.as_deref())?;
@@ -493,7 +491,7 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
         if resumed.is_none()
             && let Some(store) = &store
         {
-            let reviewer = match OpenAiProvider::new(model) {
+            let reviewer = match AutoProvider::new(model) {
                 Ok(provider) => provider,
                 Err(err) => return setup_report(StopReason::ExecutionError, &err.to_string()),
             };
@@ -689,12 +687,9 @@ async fn handle_patch(args: PatchArgs) -> anyhow::Result<()> {
         )
     };
 
-    let model = args
-        .model
-        .or_else(|| manifest.default_model.clone())
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+    let model = args.model.or_else(|| manifest.default_model.clone());
 
-    let provider = OpenAiProvider::new(model)?;
+    let provider = AutoProvider::new(model)?;
     let mut core = DustCore::load_manifest(&manifest_path, provider)?;
     core.init_scoped_mcp().await?;
 
@@ -763,14 +758,11 @@ async fn handle_learn(args: LearnArgs) -> anyhow::Result<()> {
             );
             return Ok(());
         }
-        let model = args
-            .model
-            .or_else(|| manifest.default_model.clone())
-            .unwrap_or_else(|| "gpt-4o-mini".into());
+        let model = args.model.or_else(|| manifest.default_model.clone());
         let report = dustagent::application::reinforcement::reinforce_with_research(
             &manifest,
             &store,
-            OpenAiProvider::new(model)?,
+            AutoProvider::new(model)?,
         )
         .await?;
         println!("{}", serde_json::to_string(&report)?);

@@ -8,6 +8,7 @@ pub use adapters::builtin::BuiltinToolClient;
 pub use adapters::fuzzy_patch::FuzzyPatcher;
 pub use adapters::mcp_stdio::McpStdioClient;
 pub use adapters::openai::OpenAiProvider;
+pub use adapters::provider::AutoProvider;
 pub use application::core::DustCore;
 pub use domain::manifest::{AppManifest, McpServerConfig, PackageMetadata, resolve_manifest_path};
 pub use domain::patch::{LineRange, PatchError, SearchReplaceBlock, extract_blocks};
