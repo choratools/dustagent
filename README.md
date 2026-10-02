@@ -59,6 +59,138 @@ Place options before the input text, for example `dust run summarizer --model MO
 
 `dust run` writes the model's final response to STDOUT and diagnostics to STDERR. The app prompt determines whether that response is text, JSON, or patch blocks. An `output_format` declaration guides use and reinforcement checks; it does not enforce a response schema during ordinary execution. Incomplete runs return a nonzero exit code and emit no raw result. Use `--json` or `--report` to retain partial responses and tool observations.
 
+## App development lifecycle
+
+A calling agent owns the cycle: create an app, write its skills, run and validate it, improve from experience, package a version, then distribute it. Operational results feed back into the next revision.
+
+1. **Create the app.** Generate a focused manifest and an empty skill directory. Inspect the generated prompt and MCP declarations.
+
+   ```bash
+   dust new crawler "Extract structured information from web documents"
+   ```
+
+2. **Write its skills.** Put instructions in `skills/<name>/SKILL.md`, detailed guidance in `references/`, templates in `assets/`, and optional helper code in `scripts/`. Declare each permitted skill in `app.json`. The native skill reader exposes only those declared skills; it does not execute scripts.
+
+3. **Run and validate locally.** Exercise both normal and failure cases. Inspect stop reasons, tool observations, and the actual output. Configure an output checker when a deterministic check is available. Runtime completion alone does not establish task quality or complete coverage.
+
+   ```bash
+   dust run ./apps/crawler --json "test input"
+   ```
+
+4. **Improve from experience.** Record runs and investigate which examples are useful for future tasks.
+
+   ```bash
+   dust run ./apps/crawler --experience "input"
+   dust learn ./apps/crawler
+   ```
+
+   Current reinforcement reviews recorded examples for few-shot reuse. It does not automatically rewrite skill files. The calling agent edits skills or prompts and validates the revised app again.
+
+5. **Version and package.** Set `package.version` in `app.json`, then build and test the actual distribution artifact. For version `0.1.0`:
+
+   ```bash
+   dust pack ./apps/crawler
+   dust run ./crawler-0.1.0.dustpkg --json "test input"
+   ```
+
+6. **Distribute and operate.** Another agent can run the archive directly, or optionally install it and use its package name. Installation does not replace an existing package. Feed operational results into the next improvement cycle. Use checkpoints for longer runs; changing package or declared skill contents prevents resuming an old checkpoint.
+
+DustAgent provides these individual commands. A single command that automatically manages the entire development and release lifecycle is not implemented.
+
+## CLI reference
+
+| Command | Purpose |
+| :--- | :--- |
+| `dust run <APP> [INPUT...]` | Run an app by name, JSON manifest path, package directory, or `.dustpkg` path |
+| `dust new <NAME> <DESCRIPTION>` | Generate `apps/<NAME>/app.json` and an empty `skills/` directory using an LLM |
+| `dust pack <SOURCE>` | Pack an application directory into a `.dustpkg` archive |
+| `dust install <SOURCE>` | Install a local directory or `.dustpkg` package |
+| `dust learn <APP>` | Investigate and review recorded examples for future reuse |
+| `dust patch --file <FILE> <INSTRUCTION>` | Apply generated SEARCH/REPLACE blocks to a file |
+| `dust help [COMMAND]` | Show command help |
+| `dust --version` | Show the installed version; short form: `-V` |
+
+Every subcommand supports `-h` / `--help`.
+
+### Run
+
+```bash
+dust run crawler --model MODEL --max-turns 15 "input"
+dust run ./apps/coverage-reader "input"
+dust run ./coverage-reader-0.1.0.dustpkg "input"
+git diff --cached | dust run commit_gen
+```
+
+| Option | Purpose |
+| :--- | :--- |
+| `-m, --model MODEL` | Override the model |
+| `--max-turns N` | Set this invocation's model turn budget |
+| `--timeout-ms MS` | Set the overall time budget, including startup and automatic experience review |
+| `--tool-timeout-ms MS` | Set the individual tool timeout |
+| `--json` | Emit a structured report, including incomplete results |
+| `--report PATH` | Save the termination report to a file |
+| `--checkpoint PATH` | Save conversation checkpoints during execution; requires a new file |
+| `--resume PATH` | Resume a safe checkpoint using its original input and conversation |
+| `--experience` | Record runs and review/reuse useful past examples |
+| `--experience-dir PATH` | Override the experience directory; implies `--experience` |
+
+Place options before input text. Without input arguments, `run` reads STDIN. `--resume` accepts no new input and cannot be combined with `--checkpoint`. Inspect the exit code even when using `--json`.
+
+### New
+
+```bash
+dust new summarizer "Summarize input as JSON"
+dust new reviewer "Review a diff" --stdout
+```
+
+| Option | Purpose |
+| :--- | :--- |
+| `-m, --model MODEL` | Select the scaffold model |
+| `--stdout` | Print the generated manifest without creating files |
+
+### Pack and install
+
+```bash
+dust pack ./apps/summarizer -o ./summarizer-0.1.0.dustpkg
+dust install ./summarizer-0.1.0.dustpkg
+dust run summarizer "input"
+```
+
+| Command option | Purpose |
+| :--- | :--- |
+| `pack -o, --output PATH` | Set the archive output path; defaults to `<name>-<version>.dustpkg` |
+| `install --store PATH` | Override the installation store; defaults to `~/.dustagent/packages` or `DUST_PACKAGE_HOME` |
+
+The archive output must be outside its source directory, with an existing parent directory. Existing output files and installed packages are not overwritten. For an explicit `--store`, set `DUST_PACKAGE_HOME` to the same directory when running by installed name, or run the installed directory directly.
+
+### Learn
+
+```bash
+dust learn summarizer
+dust learn summarizer --list
+```
+
+| Option | Purpose |
+| :--- | :--- |
+| `--list` | Inspect records and review reasons without calling the model |
+| `-m, --model MODEL` | Select the review model |
+| `--experience-dir PATH` | Override the experience directory |
+
+### Patch
+
+```bash
+dust patch --file src/app.py --range 15:30 --dry-run "Add error handling"
+```
+
+| Option | Purpose |
+| :--- | :--- |
+| `-f, --file FILE` | Target file; required |
+| `-r, --range RANGE` | Optional line range, such as `15:30` or `42` |
+| `-m, --model MODEL` | Override the model |
+| `--dry-run` | Print generated patch blocks without modifying the file |
+
+`patch` takes its instruction as an argument rather than reading it from STDIN.
+
 ## App-owned skills and portable packages
 
 ```bash
@@ -118,6 +250,31 @@ dust run crawler --resume state/crawl.json --max-turns 10 --json
 Resume uses the original input and requires the same manifest and working directory. Each resumed invocation grants an additional turn/time budget. Confirmed tool results remain in the conversation; they are not automatically replayed. MCP processes restart, so browser sessions and remote state are not restored. The model can still request new operations.
 
 Checkpoints are atomically saved with filesystem synchronization, owner-only Unix permissions, and a 32 MiB size limit. The CLI holds an exclusive sidecar lock released automatically when its process exits. A safe boundary after a tool batch or before a model request can resume; an interrupted tool call, unknown transport outcome, or interrupted output checker cannot. Completed runs also cannot resume. There is no force-resume option or automatic continuation. Keep `--report` and checkpoint paths distinct. See [checkpoint behavior](docs/13_체크포인트_및_재개.md) for details. Building from source requires Rust 1.89 or newer.
+
+## Completion feedback, recovery, and working state
+
+Apps can opt into feedback validation without prescribing an exploration sequence. When a final response candidate is checked, the app's checker decides `complete`, `continue`, or `blocked`. `continue` adds the checker reason to the conversation and gives the model another turn within the same budget. No additional supervisor model is called. Existing `passed`/`reason` checkers remain terminal checks by default.
+
+```json
+{
+  "working_state": true,
+  "provider_retry": {"max_retries": 2, "base_delay_ms": 250},
+  "validation": {
+    "mode": "feedback",
+    "command": "python3",
+    "args": ["${DUST_APP_ROOT}/checkers/coverage.py"],
+    "timeout_ms": 5000
+  }
+}
+```
+
+Feedback checkers receive `input`, `output`, recorded `tool_calls`, and `state`; they return a JSON verdict such as `{"decision":"continue","reason":"Body evidence is missing"}`. Tool records include status, call IDs, actual retained outputs, and truncation flags. The checker determines what evidence establishes completion. Working-state claims alone do not prove observation. Checker errors and malformed verdicts stop execution. `${DUST_APP_ROOT}` in the checker command/arguments resolves to the current package root; ordinary relative paths still use the caller's working directory.
+
+Transient execution-loop provider failures are retried by default at most twice, with 250 ms then 500 ms waits inside the existing time budget. Authentication/request errors and invalid model responses are not retried. Set `max_retries` to `0` to disable retries. Retries request the same conversation before any new tool dispatch; they never replay completed tools or unknown tool outcomes. They may incur additional inference cost. This policy applies to the execution loop, not standalone `new` or experience review calls.
+
+With `working_state: true`, the model receives `dustagent__state_get`, `dustagent__state_put`, and `dustagent__state_list`. JSON memos are local to one execution, retained in reports/checkpoints, and restored on resume. New executions start empty. Limits are 256 entries, 16 KiB per JSON value, 256 KiB total serialized state, and 20 keys per list page. The runtime stores memos without deciding exploration order.
+
+Reports add `validation_history`, `provider_retries`, and optional `working_state`. A continued validation can produce a resumable `Ready` checkpoint; an interrupted checker remains non-resumable. The [coverage reader example](apps/coverage-reader/README.md) includes a checker for supplied counts; it does not verify real browser coverage. See [execution recovery contracts](docs/15_완료_피드백_및_실행_복구.md) for payloads, limits, and compatibility.
 
 ## Improve from experience
 

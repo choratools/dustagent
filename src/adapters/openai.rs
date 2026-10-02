@@ -1,3 +1,4 @@
+use crate::error::ProviderFailure;
 use crate::ports::llm::{ChatMessage, LlmProvider, LlmResponse, ToolCall, ToolDefinition};
 use crate::{DustError, Result};
 use async_trait::async_trait;
@@ -166,32 +167,48 @@ impl LlmProvider for OpenAiProvider {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| DustError::Llm(format!("OpenAI HTTP request failed: {e}")))?;
+            .map_err(|e| DustError::Provider {
+                kind: if e.is_connect() || e.is_timeout() || e.is_body() || e.is_request() {
+                    ProviderFailure::Transient
+                } else {
+                    ProviderFailure::Permanent
+                },
+                message: format!("OpenAI HTTP request failed: {}", e.without_url()),
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read response body>".to_string());
-            return Err(DustError::Llm(format!(
-                "OpenAI API error ({status}): {body}"
-            )));
+            // Status is decisive; do not expose arbitrary server bodies or credentials.
+            let kind = match status.as_u16() {
+                408 | 429 | 500 | 502 | 503 | 504 => ProviderFailure::Transient,
+                _ => ProviderFailure::Permanent,
+            };
+            return Err(DustError::Provider {
+                kind,
+                message: format!("OpenAI API error ({status})"),
+            });
         }
-
-        let resp_json: Value = resp
-            .json()
-            .await
-            .map_err(|e| DustError::Llm(format!("Failed to parse OpenAI JSON response: {e}")))?;
+        let bytes = resp.bytes().await.map_err(|e| DustError::Provider {
+            kind: ProviderFailure::Transient,
+            message: format!("Failed to read OpenAI response body: {}", e.without_url()),
+        })?;
+        let resp_json: Value = serde_json::from_slice(&bytes).map_err(|e| DustError::Provider {
+            kind: ProviderFailure::InvalidResponse,
+            message: format!("Failed to parse OpenAI JSON response: {e}"),
+        })?;
 
         let choice = resp_json
             .get("choices")
             .and_then(|c| c.get(0))
-            .ok_or_else(|| DustError::Llm("OpenAI response missing 'choices[0]'".to_string()))?;
+            .ok_or_else(|| DustError::Provider {
+                kind: ProviderFailure::InvalidResponse,
+                message: "OpenAI response missing 'choices[0]'".into(),
+            })?;
 
-        let message = choice
-            .get("message")
-            .ok_or_else(|| DustError::Llm("OpenAI choice missing 'message'".to_string()))?;
+        let message = choice.get("message").ok_or_else(|| DustError::Provider {
+            kind: ProviderFailure::InvalidResponse,
+            message: "OpenAI choice missing 'message'".into(),
+        })?;
 
         let content = message
             .get("content")

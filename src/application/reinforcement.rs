@@ -328,6 +328,7 @@ mod evidence_tests {
         let store = ExperienceStore::new(dir.path());
         let mut app = AppManifest::new();
         app.validation = Some(ValidationConfig {
+            mode: crate::application::validation::ValidationMode::Legacy,
             command: "python3".into(), args: vec!["-c".into(), "import json,sys; json.load(sys.stdin); print(json.dumps({'passed':False,'reason':'actual assertion failed'}))".into()], timeout_ms:5000
         });
         app.research = Some(ResearchConfig {
@@ -369,6 +370,7 @@ mod evidence_tests {
         let store = ExperienceStore::new(dir.path());
         let mut app = AppManifest::new();
         app.validation = Some(ValidationConfig {
+            mode: crate::application::validation::ValidationMode::Legacy,
             command: "python3".into(), args: vec!["-c".into(), "import json,sys; d=json.load(sys.stdin); print(json.dumps({'passed':d['output']=='Hello','reason':'fixture exact output checked'}))".into()], timeout_ms:5000
         });
         app.research = Some(ResearchConfig {

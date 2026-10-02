@@ -11,7 +11,7 @@ pub use adapters::openai::OpenAiProvider;
 pub use application::core::DustCore;
 pub use domain::manifest::{AppManifest, McpServerConfig, PackageMetadata, resolve_manifest_path};
 pub use domain::patch::{LineRange, PatchError, SearchReplaceBlock, extract_blocks};
-pub use error::{DustError, Result};
+pub use error::{DustError, ProviderFailure, Result};
 pub use ports::llm::{ChatMessage, LlmProvider, LlmResponse, ToolCall, ToolDefinition};
 pub use ports::mcp::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpClient, McpTool};
 pub use ports::patcher::CodePatcher;
@@ -22,3 +22,7 @@ pub use application::checkpoint::{Checkpoint, CheckpointPhase};
 
 pub use application::package::LoadedApp;
 pub use application::skills::SkillCatalog;
+
+pub use application::retry::RetryConfig;
+pub use application::state::WorkingState;
+pub use application::validation::{ValidationDecision, ValidationMode};

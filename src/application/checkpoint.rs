@@ -65,6 +65,9 @@ impl Checkpoint {
     }
     pub fn validate_for(&self, manifest: &AppManifest) -> Result<()> {
         self.validate_protocol()?;
+        if let Some(state) = &self.report.working_state {
+            state.validate()?;
+        }
         if self.manifest_hash != manifest_hash(manifest)? {
             return Err(invalid("manifest changed"));
         }

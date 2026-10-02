@@ -177,6 +177,7 @@ async fn invalid_arguments_are_recorded_and_not_run() {
 async fn actual_validation_failure_is_not_completion_or_a_reusable_example() {
     let mut manifest = AppManifest::new();
     manifest.validation = Some(dustagent::application::validation::ValidationConfig {
+        mode: dustagent::application::validation::ValidationMode::Legacy,
         command: "python3".into(),
         args: vec!["-c".into(), "import json,sys; json.load(sys.stdin); print(json.dumps({'passed':False,'reason':'required invariant failed'}))".into()],
         timeout_ms: 5000,

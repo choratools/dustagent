@@ -13,5 +13,14 @@
   ],
   "mcp_servers": {},
   "max_turns": 5,
-  "output_format": "raw_json"
+  "output_format": "raw_json",
+  "validation": {
+    "mode": "feedback",
+    "command": "python3",
+    "args": [
+      "${DUST_APP_ROOT}/checkers/coverage.py"
+    ],
+    "timeout_ms": 5000
+  },
+  "working_state": true
 }

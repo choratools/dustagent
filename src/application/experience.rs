@@ -410,6 +410,7 @@ mod policy_scope_tests {
             .unwrap();
         let mut with_checker = original.clone();
         with_checker.validation = Some(crate::application::validation::ValidationConfig {
+            mode: crate::application::validation::ValidationMode::Legacy,
             command: "checker".into(),
             args: vec![],
             timeout_ms: 5000,

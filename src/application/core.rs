@@ -24,8 +24,10 @@ pub struct DustCore<P: LlmProvider> {
     tool_timeout_ms: u64,
     lifecycle_warnings: Vec<String>,
     checkpoint_path: Option<PathBuf>,
+    working_state: super::state::WorkingState,
     skills: Option<super::skills::SkillCatalog>,
     resource_hash: Option<String>,
+    app_root: Option<PathBuf>,
 }
 
 impl<P: LlmProvider> DustCore<P> {
@@ -47,8 +49,10 @@ impl<P: LlmProvider> DustCore<P> {
             tool_timeout_ms,
             lifecycle_warnings: Vec::new(),
             checkpoint_path: None,
+            working_state: super::state::WorkingState::default(),
             skills: None,
             resource_hash: None,
+            app_root: None,
         }
     }
 
@@ -87,6 +91,7 @@ impl<P: LlmProvider> DustCore<P> {
 
     /// Attach only this application's explicitly declared skills.
     pub fn with_app_resources(mut self, root: &Path, package_hash: Option<&str>) -> Result<Self> {
+        self.app_root = Some(root.canonicalize()?);
         let catalog = super::skills::SkillCatalog::load(root, &self.manifest.skills)
             .map_err(|error| DustError::Config(format!("Invalid app skills: {error:#}")))?;
         self.resource_hash =
@@ -174,6 +179,9 @@ impl<P: LlmProvider> DustCore<P> {
         started: Instant,
         prior_ms: u64,
     ) -> bool {
+        if self.manifest.working_state {
+            report.working_state = Some(self.working_state.clone());
+        }
         let Some(path) = &self.checkpoint_path else {
             return true;
         };
@@ -292,11 +300,65 @@ impl<P: LlmProvider> DustCore<P> {
         if self.skills.is_some() && !self.manifest.skills.is_empty() {
             tools.push(ToolDefinition::new("dustagent__read_skill", "Read this app's declared SKILL.md or a text file in its references/, scripts/, assets/. Scripts are never executed.", serde_json::json!({"type":"object","properties":{"skill":{"type":"string"},"path":{"type":"string"}},"required":["skill"],"additionalProperties":false})));
         }
+        if self.manifest.working_state {
+            tools.extend([
+                ToolDefinition::new("dustagent__state_get", "Read an execution-local memo. Memos are not verified observations.", serde_json::json!({"type":"object","properties":{"key":{"type":"string"}},"required":["key"],"additionalProperties":false})),
+                ToolDefinition::new("dustagent__state_put", "Store an execution-local JSON memo. Include evidence call IDs when relevant. This does not establish task completion.", serde_json::json!({"type":"object","properties":{"key":{"type":"string"},"value":{}},"required":["key","value"],"additionalProperties":false})),
+                ToolDefinition::new("dustagent__state_list", "List memo keys with optional prefix and lexicographic cursor; returns at most 20 keys.", serde_json::json!({"type":"object","properties":{"prefix":{"type":"string"},"cursor":{"type":"string"}},"additionalProperties":false})),
+            ]);
+        }
         Ok(tools)
     }
 
     /// Dispatches a namespaced tool execution to the appropriate MCP server.
     pub async fn execute_tool(&mut self, full_tool_name: &str, arguments: Value) -> Result<String> {
+        if matches!(
+            full_tool_name,
+            "dustagent__state_get" | "dustagent__state_put" | "dustagent__state_list"
+        ) {
+            let result: Result<Value> = (|| {
+                if !self.manifest.working_state {
+                    return Err(DustError::Config(
+                        "Working state is not enabled for this app".into(),
+                    ));
+                }
+                let string = |key: &str| {
+                    arguments
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| DustError::Config(format!("{key} must be a string")))
+                };
+                match full_tool_name {
+                    "dustagent__state_get" => self.working_state.get(string("key")?),
+                    "dustagent__state_put" => self.working_state.put(
+                        string("key")?.to_owned(),
+                        arguments
+                            .get("value")
+                            .cloned()
+                            .ok_or_else(|| DustError::Config("value is required".into()))?,
+                    ),
+                    _ => {
+                        let prefix = if arguments.get("prefix").is_some() {
+                            string("prefix")?
+                        } else {
+                            ""
+                        };
+                        let cursor = if arguments.get("cursor").is_some() {
+                            Some(string("cursor")?)
+                        } else {
+                            None
+                        };
+                        self.working_state.list(prefix, cursor)
+                    }
+                }
+            })();
+            return Ok(match result {
+                Ok(value) => serde_json::json!({"result":value,"isError":false}).to_string(),
+                Err(error) => {
+                    serde_json::json!({"error":error.to_string(),"isError":true}).to_string()
+                }
+            });
+        }
         if full_tool_name == "dustagent__read_skill" {
             let catalog = self
                 .skills
@@ -422,6 +484,16 @@ impl<P: LlmProvider> DustCore<P> {
     ) -> ExecutionReport {
         let started = Instant::now();
         let mut report = seed.map(|cp| cp.report.clone()).unwrap_or_default();
+        self.working_state = report.working_state.clone().unwrap_or_default();
+        if self.manifest.working_state {
+            report.working_state = Some(self.working_state.clone());
+        }
+        let retry_config = self.manifest.provider_retry.clone().unwrap_or_default();
+        if let Err(error) = retry_config.validate() {
+            report.stop_reason = StopReason::ExecutionError;
+            report.error = Some(error.to_string());
+            return report;
+        }
         let prior_ms = report.elapsed_ms;
         let prior_turns = report.turns_used;
         report.error = None;
@@ -528,29 +600,57 @@ impl<P: LlmProvider> DustCore<P> {
                 error: None,
                 truncated: false,
             };
-            let resp = match timeout_at(
-                deadline,
-                self.provider.chat(
-                    &messages,
-                    if tools.is_empty() { None } else { Some(&tools) },
-                ),
-            )
-            .await
-            {
-                Ok(Ok(resp)) => resp,
-                Ok(Err(err)) => {
-                    turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
-                    turn_record.error = Some(err.to_string());
-                    report.turns.push(turn_record);
-                    report.error = Some(err.to_string());
-                    stop!(report, &messages);
-                }
-                Err(_) => {
-                    turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
-                    turn_record.error = Some("Provider deadline exceeded".into());
-                    report.turns.push(turn_record);
-                    report.stop_reason = StopReason::TimeLimit;
-                    stop!(report, &messages);
+            let mut retry_index = 0;
+            let resp = loop {
+                match timeout_at(
+                    deadline,
+                    self.provider.chat(
+                        &messages,
+                        if tools.is_empty() { None } else { Some(&tools) },
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(resp)) => break resp,
+                    Ok(Err(err))
+                        if err.is_retryable_provider_failure()
+                            && retry_index < retry_config.max_retries =>
+                    {
+                        let delay = retry_config.delay(retry_index);
+                        retry_index += 1;
+                        let wait_started = Instant::now();
+                        let waiting = timeout_at(deadline, tokio::time::sleep(delay)).await;
+                        report.provider_retries.push(super::execution::RetryRecord {
+                            turn,
+                            attempt: retry_index,
+                            error: err.to_string(),
+                            delay_ms: wait_started.elapsed().as_millis().min(u64::MAX as u128)
+                                as u64,
+                        });
+                        if waiting.is_err() {
+                            turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
+                            turn_record.error =
+                                Some("Budget exhausted during provider retry delay".into());
+                            report.turns.push(turn_record);
+                            report.stop_reason = StopReason::TimeLimit;
+                            stop!(report, &messages);
+                        }
+                        // Same transcript; no tool dispatch occurred for this failed request.
+                    }
+                    Ok(Err(err)) => {
+                        turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
+                        turn_record.error = Some(err.to_string());
+                        report.turns.push(turn_record);
+                        report.error = Some(err.to_string());
+                        stop!(report, &messages);
+                    }
+                    Err(_) => {
+                        turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
+                        turn_record.error = Some("Provider deadline exceeded".into());
+                        report.turns.push(turn_record);
+                        report.stop_reason = StopReason::TimeLimit;
+                        stop!(report, &messages);
+                    }
                 }
             };
             turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
@@ -592,26 +692,63 @@ impl<P: LlmProvider> DustCore<P> {
                         report.error = Some("Budget exhausted before output validation".into());
                         stop!(report, &messages);
                     }
+                    // Resolve explicit package paths without changing the manifest/checkpoint identity.
+                    let mut config = config.clone();
+                    if let Some(root) = &self.app_root {
+                        let root = root.to_string_lossy();
+                        config.command = config.command.replace("${DUST_APP_ROOT}", &root);
+                        for argument in &mut config.args {
+                            *argument = argument.replace("${DUST_APP_ROOT}", &root);
+                        }
+                    }
                     phase = CheckpointPhase::ValidationInFlight;
                     if !self.persist(user_input, &messages, &mut report, phase, started, prior_ms) {
                         return finish_with_prior(report, started, prior_ms);
                     }
                     match timeout_at(
                         deadline,
-                        super::validation::validate(
-                            config,
+                        super::validation::validate_execution(
+                            &config,
                             user_input,
                             report.output.as_deref().unwrap_or(""),
+                            &report.tool_calls,
+                            &self.working_state,
                         ),
                     )
                     .await
                     {
                         Ok(Ok(evidence)) => {
+                            report
+                                .validation_history
+                                .push(super::execution::ValidationAttempt {
+                                    turn,
+                                    evidence: evidence.clone(),
+                                });
+                            let keep_working = evidence.decision
+                                == Some(super::validation::ValidationDecision::Continue);
+                            let feedback = evidence.reason.clone();
                             if !evidence.passed {
                                 report.stop_reason = StopReason::ValidationFailed;
                                 report.error = Some(evidence.reason.clone());
                             }
                             report.validation = Some(evidence);
+                            if keep_working {
+                                messages.push(ChatMessage::user(format!("[dustagent completion check: incomplete]\n{}\nUse this check result as feedback. Choose how to proceed within the remaining execution budget; memo entries alone are not verified evidence.", feedback)));
+                                phase = CheckpointPhase::Ready;
+                                report.stop_reason = StopReason::ExecutionError;
+                                report.error = None;
+                                if !self.persist(
+                                    user_input,
+                                    &messages,
+                                    &mut report,
+                                    phase,
+                                    started,
+                                    prior_ms,
+                                ) {
+                                    return finish_with_prior(report, started, prior_ms);
+                                }
+                                continue;
+                            }
                         }
                         Ok(Err(err)) => {
                             report.stop_reason = StopReason::ExecutionError;

@@ -572,6 +572,7 @@ fn setup_report(reason: StopReason, error: &str) -> ExecutionReport {
         error: Some(error.into()),
         warnings: Vec::new(),
         validation: None,
+        ..ExecutionReport::default()
     }
 }
 

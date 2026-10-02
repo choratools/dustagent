@@ -16,6 +16,26 @@ fn default_timeout() -> u64 {
     5000
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationMode {
+    #[default]
+    Legacy,
+    Feedback,
+}
+impl ValidationMode {
+    fn is_legacy(&self) -> bool {
+        *self == Self::Legacy
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationDecision {
+    Complete,
+    Continue,
+    Blocked,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationConfig {
@@ -24,6 +44,8 @@ pub struct ValidationConfig {
     pub args: Vec<String>,
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "ValidationMode::is_legacy")]
+    pub mode: ValidationMode,
 }
 
 impl ValidationConfig {
@@ -52,6 +74,8 @@ pub struct ValidationEvidence {
     pub passed: bool,
     pub reason: String,
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ValidationDecision>,
 }
 
 #[derive(Deserialize)]
@@ -61,11 +85,19 @@ struct Verdict {
     reason: String,
 }
 
-fn failure(reason: &str, exit_code: Option<i32>) -> ValidationEvidence {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeedbackVerdict {
+    decision: ValidationDecision,
+    reason: String,
+}
+
+fn failure(mode: ValidationMode, reason: &str, exit_code: Option<i32>) -> ValidationEvidence {
     ValidationEvidence {
         passed: false,
         reason: reason.into(),
         exit_code,
+        decision: (mode == ValidationMode::Feedback).then_some(ValidationDecision::Blocked),
     }
 }
 
@@ -89,6 +121,26 @@ pub async fn validate(
     input: &str,
     output: &str,
 ) -> Result<ValidationEvidence> {
+    let payload = serde_json::json!({"input": input, "output": output});
+    run(config, payload).await
+}
+
+pub async fn validate_execution(
+    config: &ValidationConfig,
+    input: &str,
+    output: &str,
+    tool_calls: &[super::execution::ToolRecord],
+    state: &super::state::WorkingState,
+) -> Result<ValidationEvidence> {
+    let payload = if config.mode == ValidationMode::Feedback {
+        serde_json::json!({"input": input, "output": output, "tool_calls": tool_calls, "state": state})
+    } else {
+        serde_json::json!({"input": input, "output": output})
+    };
+    run(config, payload).await
+}
+
+async fn run(config: &ValidationConfig, payload: serde_json::Value) -> Result<ValidationEvidence> {
     config.validate()?;
     let mut child = match Command::new(&config.command)
         .args(&config.args)
@@ -99,12 +151,18 @@ pub async fn validate(
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => return Ok(failure("Validation command could not start", None)),
+        Err(_) => {
+            return Ok(failure(
+                config.mode,
+                "Validation command could not start",
+                None,
+            ));
+        }
     };
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
-    let payload = serde_json::to_vec(&serde_json::json!({"input": input, "output": output}))?;
+    let payload = serde_json::to_vec(&payload)?;
     let operation = async {
         tokio::try_join!(
             async {
@@ -125,6 +183,7 @@ pub async fn validate(
             let _ = child.kill().await;
             let code = child.wait().await.ok().and_then(|status| status.code());
             return Ok(failure(
+                config.mode,
                 if failed.is_err() {
                     "Validation timed out"
                 } else {
@@ -136,29 +195,49 @@ pub async fn validate(
     };
     if !status.success() {
         return Ok(failure(
+            config.mode,
             "Validation command exited unsuccessfully",
             status.code(),
         ));
     }
-    let verdict: Verdict = match serde_json::from_slice(&stdout) {
-        Ok(verdict) => verdict,
-        Err(_) => {
-            return Ok(failure(
-                "Validation command returned an invalid verdict",
-                status.code(),
-            ));
-        }
+    let (passed, reason, decision) = match config.mode {
+        ValidationMode::Legacy => match serde_json::from_slice::<Verdict>(&stdout) {
+            Ok(verdict) => (verdict.passed, verdict.reason, None),
+            Err(_) => {
+                return Ok(failure(
+                    config.mode,
+                    "Validation command returned an invalid verdict",
+                    status.code(),
+                ));
+            }
+        },
+        ValidationMode::Feedback => match serde_json::from_slice::<FeedbackVerdict>(&stdout) {
+            Ok(verdict) => (
+                verdict.decision == ValidationDecision::Complete,
+                verdict.reason,
+                Some(verdict.decision),
+            ),
+            Err(_) => {
+                return Ok(failure(
+                    config.mode,
+                    "Validation command returned an invalid verdict",
+                    status.code(),
+                ));
+            }
+        },
     };
-    if verdict.reason.trim().is_empty() || verdict.reason.len() > REASON_LIMIT {
+    if reason.trim().is_empty() || reason.len() > REASON_LIMIT {
         return Ok(failure(
+            config.mode,
             "Validation command returned an invalid reason",
             status.code(),
         ));
     }
     Ok(ValidationEvidence {
-        passed: verdict.passed,
-        reason: verdict.reason,
+        passed,
+        reason,
         exit_code: status.code(),
+        decision,
     })
 }
 
@@ -170,6 +249,7 @@ mod tests {
             command: "python3".into(),
             args: vec!["-c".into(), script.into()],
             timeout_ms: 5000,
+            mode: ValidationMode::Legacy,
         }
     }
     #[tokio::test]

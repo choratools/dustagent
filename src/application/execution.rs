@@ -48,6 +48,12 @@ pub struct TurnRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_state: Option<super::state::WorkingState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_retries: Vec<RetryRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub validation_history: Vec<ValidationAttempt>,
     pub stop_reason: StopReason,
     pub output: Option<String>,
     pub turns_used: usize,
@@ -63,6 +69,9 @@ pub struct ExecutionReport {
 impl Default for ExecutionReport {
     fn default() -> Self {
         Self {
+            working_state: None,
+            provider_retries: Vec::new(),
+            validation_history: Vec::new(),
             stop_reason: StopReason::ExecutionError,
             output: None,
             turns_used: 0,
@@ -92,4 +101,17 @@ impl ExecutionReport {
             self.error.map(|e| format!(": {e}")).unwrap_or_default()
         )))
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryRecord {
+    pub turn: usize,
+    pub attempt: usize,
+    pub error: String,
+    pub delay_ms: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationAttempt {
+    pub turn: usize,
+    pub evidence: super::validation::ValidationEvidence,
 }

@@ -58,6 +58,12 @@ pub struct PackageMetadata {
 /// Agent-as-an-Application (AaaA) manifest configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AppManifest {
+    /// Opt-in execution-local JSON memo tools.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub working_state: bool,
+    /// Bounded provider retry policy; omitted means the runtime default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_retry: Option<crate::application::retry::RetryConfig>,
     /// Distribution metadata for a directory or archive package.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<PackageMetadata>,
@@ -126,6 +132,9 @@ impl AppManifest {
         let manifest: Self = serde_json::from_str(content)
             .map_err(|e| DustError::Manifest(format!("Failed to parse manifest JSON: {e}")))?;
         manifest.validate_native_namespace()?;
+        if let Some(policy) = &manifest.provider_retry {
+            policy.validate()?;
+        }
         Ok(manifest)
     }
 
@@ -218,4 +227,8 @@ pub fn resolve_manifest_path(app_name_or_path: &str, base_dir: &Path) -> Result<
         "App manifest '{app_name_or_path}' not found in '{}' or apps/ directory",
         base_dir.display()
     )))
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
