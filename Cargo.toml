@@ -2,6 +2,7 @@
 name = "dustagent"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 authors = ["DustAgent Contributors"]
 description = "Ultra-lightweight Unix-style Agent as an Application (AaaA) runtime"
 license = "MIT OR Apache-2.0"

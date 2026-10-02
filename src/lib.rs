@@ -15,3 +15,7 @@ pub use error::{DustError, Result};
 pub use ports::llm::{ChatMessage, LlmProvider, LlmResponse, ToolCall, ToolDefinition};
 pub use ports::mcp::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpClient, McpTool};
 pub use ports::patcher::CodePatcher;
+
+pub use application::execution::{ExecutionReport, StopReason, ToolRecord, ToolStatus, TurnRecord};
+
+pub use application::checkpoint::{Checkpoint, CheckpointPhase};

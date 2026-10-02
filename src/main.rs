@@ -11,6 +11,7 @@ use dustagent::domain::manifest::{AppManifest, resolve_manifest_path};
 use dustagent::domain::patch::{LineRange, extract_blocks};
 use dustagent::ports::llm::{ChatMessage, LlmProvider};
 use dustagent::ports::patcher::CodePatcher;
+use dustagent::{ExecutionReport, StopReason};
 
 /// Built-in scaffold system prompt used when `apps/scaffold.json` is absent.
 const SCAFFOLD_SYSTEM_PROMPT: &str = r#"You are DustAgent Scaffold. Generate a DustAgent application manifest.
@@ -86,6 +87,34 @@ struct RunArgs {
     #[arg(long)]
     experience_dir: Option<PathBuf>,
 
+    /// Emit a structured execution report, including partial results
+    #[arg(long)]
+    json: bool,
+
+    /// Save an execution report to this JSON file
+    #[arg(long)]
+    report: Option<PathBuf>,
+
+    /// Persist resumable conversation checkpoints during execution
+    #[arg(long, conflicts_with = "resume")]
+    checkpoint: Option<PathBuf>,
+
+    /// Continue a safe checkpoint using its original input and conversation
+    #[arg(long, conflicts_with = "checkpoint")]
+    resume: Option<PathBuf>,
+
+    /// Override overall budget (including startup and automatic review)
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400_000))]
+    timeout_ms: Option<u64>,
+
+    /// Override per-tool timeout
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400_000))]
+    tool_timeout_ms: Option<u64>,
+
+    /// Override maximum model turns
+    #[arg(long)]
+    max_turns: Option<usize>,
+
     /// Input query, URL, or prompt (reads from STDIN if omitted)
     #[arg(trailing_var_arg = true)]
     input: Vec<String>,
@@ -156,7 +185,7 @@ async fn main() -> ExitCode {
             }
         },
         Commands::Run(args) => match handle_run(args).await {
-            Ok(_) => ExitCode::SUCCESS,
+            Ok(code) => ExitCode::from(code),
             Err(err) => {
                 eprintln!("Error: {err}");
                 ExitCode::FAILURE
@@ -255,11 +284,44 @@ async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_run(args: RunArgs) -> anyhow::Result<()> {
+async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
     let current_dir = std::env::current_dir()?;
     let manifest_path = resolve_manifest_path(&args.app, &current_dir)?;
 
-    let user_input = if !args.input.is_empty() {
+    let manifest = AppManifest::from_file(&manifest_path)?;
+    let checkpoint_path = args.resume.as_ref().or(args.checkpoint.as_ref());
+    let checkpoint_guard = checkpoint_path
+        .map(|path| acquire_checkpoint_lease(path))
+        .transpose()?;
+    let checkpoint_path = checkpoint_guard.as_ref().map(|(path, _lease)| path.clone());
+    if let Some(checkpoint_path) = &checkpoint_path {
+        if args.checkpoint.is_some() && checkpoint_path.exists() {
+            anyhow::bail!("Checkpoint already exists; use --resume or a new path");
+        }
+        if let Some(report_path) = &args.report {
+            let normalized = normalize_artifact_path(report_path)?;
+            if normalized == *checkpoint_path {
+                anyhow::bail!("--report must not overwrite the checkpoint");
+            }
+        }
+    }
+    let resumed = if args.resume.is_some() {
+        if !args.input.is_empty() {
+            anyhow::bail!(
+                "--resume uses the checkpoint's original input; do not provide new input"
+            );
+        }
+        let checkpoint =
+            dustagent::application::checkpoint::load(checkpoint_path.as_ref().unwrap())?;
+        checkpoint.validate_for(&manifest)?;
+        checkpoint.ensure_resumable()?;
+        Some(checkpoint)
+    } else {
+        None
+    };
+    let user_input = if let Some(checkpoint) = &resumed {
+        checkpoint.user_input.clone()
+    } else if !args.input.is_empty() {
         args.input.join(" ")
     } else if !std::io::stdin().is_terminal() {
         let mut buffer = String::new();
@@ -273,44 +335,191 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<()> {
         anyhow::bail!("Input was empty.");
     }
 
-    let manifest = AppManifest::from_file(&manifest_path)?;
     let model = args
         .model
         .or_else(|| manifest.default_model.clone())
         .unwrap_or_else(|| "gpt-4o-mini".to_string());
 
+    let timeout_ms = args.timeout_ms.or(manifest.timeout_ms).unwrap_or(300_000);
+    let tool_timeout_ms = args
+        .tool_timeout_ms
+        .or(manifest.tool_timeout_ms)
+        .unwrap_or(30_000);
+    if !(1..=86_400_000).contains(&timeout_ms) || !(1..=86_400_000).contains(&tool_timeout_ms) {
+        anyhow::bail!("Timeouts must be between 1 and 86400000 milliseconds");
+    }
     let provider = OpenAiProvider::new(model.clone())?;
-    let mut core = DustCore::load_manifest(&manifest_path, provider)?;
-    core.init_scoped_mcp().await?;
-
-    let result = if args.experience || args.experience_dir.is_some() {
-        let store = ExperienceStore::new(experience_directory(args.experience_dir)?);
-        match dustagent::application::reinforcement::reinforce_with_research(
-            &manifest,
-            &store,
-            OpenAiProvider::new(model)?,
-        )
-        .await
-        {
-            Ok(report) => eprintln!(
-                "[dustagent] automatic review: {}",
-                serde_json::to_string(&report)?
-            ),
-            Err(err) => eprintln!("[dustagent] automatic review failed: {err}"),
+    let mut core =
+        DustCore::new(manifest.clone(), provider).with_timeouts(timeout_ms, tool_timeout_ms);
+    if let Some(path) = &checkpoint_path {
+        core = core.with_checkpoint(path);
+    }
+    if let Some(turns) = args.max_turns {
+        core = core.with_max_turns(turns);
+    }
+    let started = std::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut warnings = Vec::new();
+    let operation = async {
+        match tokio::time::timeout_at(deadline, core.init_scoped_mcp()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return setup_report(StopReason::ExecutionError, &err.to_string()),
+            Err(_) => {
+                return setup_report(StopReason::TimeLimit, "Budget exhausted during MCP startup");
+            }
         }
-        core.execute_with_experience(&user_input, &store).await
-    } else {
-        core.execute(&user_input).await
+        let store = if args.experience || args.experience_dir.is_some() {
+            match experience_directory(args.experience_dir.clone()) {
+                Ok(path) => Some(ExperienceStore::new(path)),
+                Err(err) => return setup_report(StopReason::ExecutionError, &err.to_string()),
+            }
+        } else {
+            None
+        };
+        if resumed.is_none()
+            && let Some(store) = &store
+        {
+            let reviewer = match OpenAiProvider::new(model) {
+                Ok(provider) => provider,
+                Err(err) => return setup_report(StopReason::ExecutionError, &err.to_string()),
+            };
+            match tokio::time::timeout_at(
+                deadline,
+                dustagent::application::reinforcement::reinforce_with_research(
+                    &manifest, store, reviewer,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(review)) => eprintln!(
+                    "[dustagent] automatic review: {}",
+                    serde_json::to_string(&review).unwrap_or_default()
+                ),
+                Ok(Err(err)) => warnings.push(format!("Automatic review failed: {err}")),
+                Err(_) => {
+                    return setup_report(
+                        StopReason::TimeLimit,
+                        "Budget exhausted during automatic review",
+                    );
+                }
+            }
+        }
+        let remaining = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .as_millis() as u64;
+        if remaining == 0 {
+            return setup_report(StopReason::TimeLimit, "Budget exhausted before execution");
+        }
+        core.set_timeouts(remaining, tool_timeout_ms);
+        if let Some(checkpoint) = &resumed {
+            if let Some(store) = &store {
+                core.resume_report_with_experience(checkpoint, store).await
+            } else {
+                core.resume_report(checkpoint).await
+            }
+        } else if let Some(store) = &store {
+            core.execute_report_with_experience(&user_input, store)
+                .await
+        } else {
+            core.execute_report(&user_input).await
+        }
     };
-    core.shutdown().await?;
-    let output = result?;
+    let mut report = operation.await;
+    report.warnings.extend(core.take_lifecycle_warnings());
+    if let Err(err) = core.shutdown().await {
+        report.warnings.push(format!("Shutdown: {err}"));
+    }
+    report.warnings.extend(warnings);
+    let prior_elapsed = resumed
+        .as_ref()
+        .map_or(0, |checkpoint| checkpoint.report.elapsed_ms);
+    report.elapsed_ms =
+        prior_elapsed.saturating_add(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+    let report_error = args
+        .report
+        .as_ref()
+        .and_then(|path| write_report(path, &report).err());
+    if let Some(error) = &report_error {
+        report
+            .warnings
+            .push(format!("Report file was not saved: {error}"));
+    }
+    let mut stdout = std::io::stdout().lock();
+    if args.json {
+        writeln!(stdout, "{}", serde_json::to_string(&report)?)?;
+    } else if report.is_complete() && report_error.is_none() {
+        writeln!(stdout, "{}", report.output.as_deref().unwrap_or(""))?;
+    }
+    stdout.flush()?;
+    for warning in &report.warnings {
+        eprintln!("[dustagent] warning: {warning}");
+    }
+    if let Some(error) = report_error {
+        return Err(error);
+    }
+    let code = match report.stop_reason {
+        StopReason::Completed => 0,
+        StopReason::TurnLimit => 2,
+        StopReason::TimeLimit | StopReason::ToolTimeout => 3,
+        StopReason::EmptyResponse => 4,
+        StopReason::ExecutionError => 5,
+        StopReason::ValidationFailed => 6,
+    };
+    if code != 0 {
+        eprintln!(
+            "[dustagent] stopped: {:?}; turns={}, elapsed_ms={}; {}",
+            report.stop_reason,
+            report.turns_used,
+            report.elapsed_ms,
+            report
+                .error
+                .as_deref()
+                .unwrap_or("See --json or --report for retained evidence")
+        );
+    }
+    Ok(code)
+}
 
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    writeln!(handle, "{output}")?;
-    handle.flush()?;
+fn setup_report(reason: StopReason, error: &str) -> ExecutionReport {
+    ExecutionReport {
+        stop_reason: reason,
+        output: None,
+        turns_used: 0,
+        elapsed_ms: 0,
+        tool_calls: Vec::new(),
+        turns: Vec::new(),
+        error: Some(error.into()),
+        warnings: Vec::new(),
+        validation: None,
+    }
+}
 
-    Ok(())
+fn write_report(path: &std::path::Path, report: &ExecutionReport) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".dust-report-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&serde_json::to_vec_pretty(report)?)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
 }
 
 async fn handle_patch(args: PatchArgs) -> anyhow::Result<()> {
@@ -373,8 +582,9 @@ async fn handle_patch(args: PatchArgs) -> anyhow::Result<()> {
     let mut core = DustCore::load_manifest(&manifest_path, provider)?;
     core.init_scoped_mcp().await?;
 
-    let result = core.execute(&user_prompt).await?;
+    let execution = core.execute(&user_prompt).await;
     core.shutdown().await?;
+    let result = execution?;
 
     let blocks = extract_blocks(&result);
     if blocks.is_empty() {
@@ -450,4 +660,39 @@ async fn handle_learn(args: LearnArgs) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string(&report)?);
     }
     Ok(())
+}
+
+fn normalize_artifact_path(path: &std::path::Path) -> anyhow::Result<PathBuf> {
+    if path.exists() {
+        return Ok(path.canonicalize()?);
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Artifact path must name a file"))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    Ok(parent.canonicalize()?.join(name))
+}
+
+fn acquire_checkpoint_lease(path: &std::path::Path) -> anyhow::Result<(PathBuf, std::fs::File)> {
+    let path = normalize_artifact_path(path)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Checkpoint must name a file"))?;
+    let lease_path = path.with_file_name(format!(".{}.lock", name.to_string_lossy()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lease = options.open(lease_path)?;
+    lease.try_lock().map_err(|error| {
+        anyhow::anyhow!("Checkpoint is already in use or locking failed: {error}")
+    })?;
+    Ok((path, lease))
 }

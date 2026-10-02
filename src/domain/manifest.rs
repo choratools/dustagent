@@ -72,6 +72,12 @@ pub struct AppManifest {
     /// Optional max conversation turns for tool calling loop (default: 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
+    /// Overall execution timeout in milliseconds (default: 300000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Per-tool timeout in milliseconds (default: 30000).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_ms: Option<u64>,
     /// Explicit local checker for recorded input/output pairs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validation: Option<crate::application::validation::ValidationConfig>,

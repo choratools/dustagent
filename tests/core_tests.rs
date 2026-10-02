@@ -165,6 +165,8 @@ async fn test_single_shot_execution_without_tools() {
         mcp_servers: HashMap::new(),
         output_format: Some("text".to_string()),
         max_turns: None,
+        timeout_ms: None,
+        tool_timeout_ms: None,
         validation: None,
         research: None,
     };
@@ -215,6 +217,8 @@ async fn test_multiturn_tool_execution() {
         mcp_servers: HashMap::new(),
         output_format: Some("raw_json".to_string()),
         max_turns: None,
+        timeout_ms: None,
+        tool_timeout_ms: None,
         validation: None,
         research: None,
     };
@@ -329,6 +333,8 @@ async fn test_tool_execution_error_handling() {
         mcp_servers: HashMap::new(),
         output_format: None,
         max_turns: None,
+        timeout_ms: None,
+        tool_timeout_ms: None,
         validation: None,
         research: None,
     };
@@ -371,6 +377,8 @@ async fn test_max_turns_limit() {
         mcp_servers: HashMap::new(),
         output_format: None,
         max_turns: None,
+        timeout_ms: None,
+        tool_timeout_ms: None,
         validation: None,
         research: None,
     };
@@ -386,12 +394,8 @@ async fn test_max_turns_limit() {
 
     let mut core = DustCore::new(manifest, mock_llm.clone()).with_max_turns(3);
 
-    let result = core
-        .execute("Infinite loop")
-        .await
-        .expect("Should terminate on max turns");
-    // Max turns reached without final content returns empty string
-    assert_eq!(result, "");
+    let result = core.execute("Infinite loop").await;
+    assert!(result.is_err(), "Turn exhaustion must not look successful");
     assert_eq!(mock_llm.call_count(), 3);
 }
 
@@ -452,9 +456,6 @@ async fn failed_tools_and_turn_exhaustion_are_not_curatable() {
     assert!(!records[0].completed);
     assert!(store.approve(&manifest, &records[0].id, true).is_err());
     let mut core = DustCore::new(manifest.clone(), MockLlmProvider::new()).with_max_turns(0);
-    assert_eq!(
-        core.execute_with_experience("Rust", &store).await.unwrap(),
-        ""
-    );
+    assert!(core.execute_with_experience("Rust", &store).await.is_err());
     assert!(store.list(&manifest).unwrap().iter().all(|e| !e.completed));
 }

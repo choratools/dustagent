@@ -57,7 +57,48 @@ Place options before the input text, for example `dust run summarizer --model MO
 
 `dust new` generates a manifest using the scaffold prompt; the calling agent should inspect the generated prompt and tool declarations before running it. App names resolve against the current directory and its `apps/` directory.
 
-`dust run` writes the model's final response to STDOUT and diagnostics to STDERR. The app prompt determines whether that response is text, JSON, or patch blocks. An `output_format` declaration guides use and reinforcement checks; it does not enforce a response schema during ordinary execution. Reaching the turn limit can return an empty response, so callers should check the result as well as the exit code.
+`dust run` writes the model's final response to STDOUT and diagnostics to STDERR. The app prompt determines whether that response is text, JSON, or patch blocks. An `output_format` declaration guides use and reinforcement checks; it does not enforce a response schema during ordinary execution. Incomplete runs return a nonzero exit code and emit no raw result. Use `--json` or `--report` to retain partial responses and tool observations.
+
+## Execution reports and budgets
+
+```bash
+# Structured result on stdout, including evidence when a run stops early.
+dust run crawler --json --max-turns 15 --timeout-ms 120000 --tool-timeout-ms 15000 "https://example.com"
+
+# Keep normal result output and write a private JSON report file.
+git diff --cached | dust run commit_gen --report reports/commit.json
+```
+
+Reports distinguish final responses from tool observations. They contain `stop_reason`, `output`, `turns_used`, `elapsed_ms`, `turns`, `tool_calls`, `validation`, and `warnings`. On an incomplete run, `output` can contain the last partial assistant text; it is not a completed task result. Tool records retain actual arguments, outputs, failures, and durations. Coverage metadata supplied by a tool stays in its recorded output; the runtime does not infer that all links or documents were observed.
+
+| Exit code | Stop reason | Meaning |
+| :--- | :--- | :--- |
+| `0` | `completed` | Nonempty final response; configured output checker passed, if present |
+| `1` | CLI/setup error | Invalid input, configuration, or report-file I/O failure |
+| `2` | `turn_limit` | Model turn budget exhausted |
+| `3` | `time_limit` / `tool_timeout` | Overall or individual tool deadline exhausted |
+| `4` | `empty_response` | Model ended without nonempty final content |
+| `5` | `execution_error` | Execution failed, such as a provider request error |
+| `6` | `validation_failed` | Configured checker rejected the output |
+
+Without `--json`, only completed runs emit task output on STDOUT. With `--json`, failed runs also emit their report; callers must still inspect the exit code. `--report` saves the report atomically with owner-only permissions on Unix. Reports can include sensitive task and tool data.
+
+Defaults are ten model turns, five minutes overall, and thirty seconds per tool call. App fields `max_turns`, `timeout_ms`, and `tool_timeout_ms` set defaults; CLI options override them. Timeout values support 1–86400000 milliseconds. The CLI's overall deadline includes MCP startup, automatic experience review, tool discovery, model requests, and tool calls. Bounded cancellation cleanup can add up to one second and shutdown has a separate five-second budget. Synchronous input/report file I/O is outside the async deadline.
+
+Timed-out MCP clients are discarded to avoid consuming a late response as a later request's result. A timed-out remote operation can still have executed; the runtime does not automatically replay it. Recovered tool failures remain visible in the report and prevent admission as successful experience examples. Output-check failures also prevent admission.
+
+Library callers use `execute_report()` or `execute_report_with_experience()` for structured results. Existing `execute()` methods return errors on incomplete execution. Library execution budgets cover discovery and execution; initialization is separately bounded. `completed` describes the execution contract, not exhaustive crawl coverage or factual correctness.
+
+Reports are written at termination. Use a separate checkpoint to retain the conversation during execution:
+
+```bash
+dust run crawler --checkpoint state/crawl.json --max-turns 10 "https://example.com"
+dust run crawler --resume state/crawl.json --max-turns 10 --json
+```
+
+Resume uses the original input and requires the same manifest and working directory. Each resumed invocation grants an additional turn/time budget. Confirmed tool results remain in the conversation; they are not automatically replayed. MCP processes restart, so browser sessions and remote state are not restored. The model can still request new operations.
+
+Checkpoints are atomically saved with filesystem synchronization, owner-only Unix permissions, and a 32 MiB size limit. The CLI holds an exclusive sidecar lock released automatically when its process exits. A safe boundary after a tool batch or before a model request can resume; an interrupted tool call, unknown transport outcome, or interrupted output checker cannot. Completed runs also cannot resume. There is no force-resume option or automatic continuation. Keep `--report` and checkpoint paths distinct. See [checkpoint behavior](docs/13_체크포인트_및_재개.md) for details. Building from source requires Rust 1.89 or newer.
 
 ## Improve from experience
 
@@ -109,7 +150,7 @@ An app can include these fields:
 }
 ```
 
-The fixed command receives `{ "input": "...", "output": "..." }` as JSON on STDIN. It must exit `0` and return a JSON verdict on STDOUT:
+The checker also runs on the final response before execution is marked complete. The fixed command receives `{ "input": "...", "output": "..." }` as JSON on STDIN. It must exit `0` and return a JSON verdict on STDOUT:
 
 ```json
 {"passed": true, "reason": "Checked the summary key and 200-character bound"}
