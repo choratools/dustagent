@@ -68,7 +68,7 @@ async fn oversized_unsummarizable_request_stops_before_provider_and_keeps_origin
     remove_archive(reference);
 }
 #[tokio::test]
-async fn compacted_required_batch_must_fit_before_task_dispatch() {
+async fn oversized_recent_answer_is_summarized_before_task_dispatch() {
     let provider = model("brief notes");
     let seen = provider.requests.clone();
     let mut manifest = AppManifest::new();
@@ -81,20 +81,15 @@ async fn compacted_required_batch_must_fit_before_task_dispatch() {
     let mut session = AgentSession::new();
     core.prompt_report(&mut session, "one").await;
     core.prompt_report(&mut session, "two").await;
+    let prior_requests = seen.lock().unwrap().len();
     let report = core.prompt_report(&mut session, "three").await;
-    assert_eq!(report.stop_reason, StopReason::ExecutionError);
-    assert!(
-        report
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("original context retained")
-    );
-    assert!(report.compactions.is_empty());
+    assert_eq!(report.stop_reason, StopReason::Completed);
+    assert_eq!(report.compactions.len(), 1);
+    assert!(report.compactions[0].estimated_tokens_after < 5000);
     assert_eq!(
         seen.lock().unwrap().len(),
-        3,
-        "no task dispatch after insufficient compaction"
+        prior_requests + report.turns_used,
+        "summary precedes the task dispatch after sufficient compaction"
     );
     remove_archive(report.transcript.as_ref().unwrap());
 }
@@ -219,7 +214,7 @@ async fn compaction_directory_is_cumulative_scoped_and_reopens_with_original_anc
     remove_archive(reference);
 }
 #[tokio::test]
-async fn rejected_directory_hint_does_not_commit_an_index() {
+async fn tighter_budget_drops_recent_answer_and_keeps_directory_within_bounds() {
     async fn attempt(trigger: usize) -> (DustCore<Model>, dustagent::ExecutionReport, Requests) {
         let provider = model("brief");
         let seen = provider.requests.clone();
@@ -242,16 +237,10 @@ async fn rejected_directory_hint_does_not_commit_an_index() {
     let trigger = baseline.compactions[0].estimated_tokens_after - 1;
     remove_archive(baseline.transcript.as_ref().unwrap());
     let (mut core, failed, seen) = attempt(trigger).await;
-    assert_eq!(failed.stop_reason, StopReason::ExecutionError);
-    assert!(
-        failed
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("directory hint exceeds")
-    );
-    assert!(failed.compactions.is_empty());
-    assert_eq!(seen.lock().unwrap().len(), 3);
+    assert_eq!(failed.stop_reason, StopReason::Completed);
+    assert_eq!(failed.compactions.len(), 1);
+    assert!(failed.compactions[0].estimated_tokens_after < trigger);
+    assert_eq!(seen.lock().unwrap().len(), 4);
     let directory: serde_json::Value = serde_json::from_str(
         &core
             .execute_tool("dustagent__history_directory", serde_json::json!({}))
@@ -259,10 +248,10 @@ async fn rejected_directory_hint_does_not_commit_an_index() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(directory["result"]["count"], 0);
+    assert_eq!(directory["result"]["count"], 1);
     let reference = failed.transcript.as_ref().unwrap();
     let store = TranscriptStore::open(reference, &reference.binding).unwrap();
-    assert_eq!(store.directory(0, 10, None).unwrap()["count"], 0);
+    assert_eq!(store.directory(0, 10, None).unwrap()["count"], 1);
     remove_archive(reference);
 }
 fn remove_archive(reference: &dustagent::application::transcript::TranscriptRef) {
