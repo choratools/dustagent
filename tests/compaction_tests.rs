@@ -340,15 +340,9 @@ async fn invalid_summary_keeps_original_archive_and_stops_before_task_request() 
     core.prompt_report(&mut session, "two").await;
     let report = core.prompt_report(&mut session, "three").await;
     assert_eq!(report.stop_reason, StopReason::ExecutionError);
-    assert!(
-        report
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("empty or oversized")
-    );
+    assert!(report.error.as_deref().unwrap().contains("empty summary"));
     assert!(report.compactions.is_empty());
-    assert_eq!(seen.lock().unwrap().len(), 3);
+    assert_eq!(seen.lock().unwrap().len(), 5);
     let reference = report.transcript.as_ref().unwrap();
     let store = TranscriptStore::open(reference, &reference.binding).unwrap();
     assert_eq!(

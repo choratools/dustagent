@@ -11,6 +11,17 @@ pub struct CompactionConfig {
     pub trigger_tokens: usize,
     pub keep_recent_messages: usize,
     pub max_summary_bytes: usize,
+    #[serde(
+        default = "default_summary_retries",
+        skip_serializing_if = "is_default_summary_retries"
+    )]
+    pub max_summary_retries: usize,
+}
+fn default_summary_retries() -> usize {
+    2
+}
+fn is_default_summary_retries(value: &usize) -> bool {
+    *value == 2
 }
 impl Default for CompactionConfig {
     fn default() -> Self {
@@ -20,6 +31,7 @@ impl Default for CompactionConfig {
             trigger_tokens: 0,
             keep_recent_messages: 0,
             max_summary_bytes: 0,
+            max_summary_retries: 2,
         }
     }
 }
@@ -31,8 +43,9 @@ impl CompactionConfig {
             || (self.trigger_tokens != 0 && !(1024..=1_000_000).contains(&self.trigger_tokens))
             || (self.keep_recent_messages != 0 && !(2..=128).contains(&self.keep_recent_messages))
             || (self.max_summary_bytes != 0 && !(256..=65_536).contains(&self.max_summary_bytes))
+            || self.max_summary_retries > 3
         {
-            return Err(DustError::Config("Compaction bounds: context_window_tokens 4096..10000000, trigger_tokens 0(auto) or 1024..1000000, keep_recent_messages 0(auto) or 2..128, max_summary_bytes 0(auto) or 256..65536".into()));
+            return Err(DustError::Config("Compaction bounds: context_window_tokens 4096..10000000, trigger_tokens 0(auto) or 1024..1000000, keep_recent_messages 0(auto) or 2..128, max_summary_bytes 0(auto) or 256..65536, max_summary_retries 0..3".into()));
         }
         Ok(())
     }

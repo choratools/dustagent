@@ -83,7 +83,7 @@ fn run(dir: &Path, app: &Path, url: &str, input: &str) -> (Value, bool) {
             app.to_str().unwrap(),
             "--json",
             "--max-turns",
-            "10",
+            "12",
             "--timeout-ms",
             "10000",
             input,
@@ -139,6 +139,7 @@ fn compact_keeps_request_and_safe_tool_batches_and_native_history_recovers_origi
         call("large-two", "fixture__large", json!({})),
         call("large-three", "fixture__large", json!({})),
         call("large-again", "fixture__large", json!({})),
+        answer(""),
         answer(
             "Earlier tool returned a long fixture result. The archive holds its original at index 4.",
         ),
@@ -171,7 +172,7 @@ fn compact_keeps_request_and_safe_tool_batches_and_native_history_recovers_origi
     );
     assert!(archive(&report).contains("ORIGINAL_BEYOND_64K"));
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 10);
+    assert_eq!(requests.len(), 11);
     assert!(
         requests[5].get("tools").is_none(),
         "summary must not dispatch tools"
@@ -182,9 +183,21 @@ fn compact_keeps_request_and_safe_tool_batches_and_native_history_recovers_origi
             .unwrap()
             .starts_with("Produce continuation notes")
     );
-    let reduced = &requests[6]["messages"];
+    assert!(
+        requests[6].get("tools").is_none(),
+        "retry is also tool-less"
+    );
+    assert!(
+        requests[6]["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("empty summary")
+    );
+    assert_eq!(report["compaction_attempts"][0]["status"], "empty");
+    assert_eq!(report["compaction_attempts"][1]["status"], "accepted");
+    let reduced = &requests[7]["messages"];
     assert!(reduced.to_string().contains("history_directory"));
-    let directory_reply = requests[7]["messages"]
+    let directory_reply = requests[8]["messages"]
         .as_array()
         .unwrap()
         .iter()
@@ -217,7 +230,7 @@ fn compact_keeps_request_and_safe_tool_batches_and_native_history_recovers_origi
             .any(|message| message["tool_call_id"] == "large-again")
     );
     assert!(
-        requests[8]["messages"]
+        requests[9]["messages"]
             .as_array()
             .unwrap()
             .iter()
@@ -229,7 +242,7 @@ fn compact_keeps_request_and_safe_tool_batches_and_native_history_recovers_origi
         "search returns matching original snippets"
     );
     assert!(
-        requests[9]["messages"]
+        requests[10]["messages"]
             .as_array()
             .unwrap()
             .iter()
@@ -252,6 +265,8 @@ fn rejected_empty_compaction_preserves_full_original_and_reports_failure() {
         call("large-three", "fixture__large", json!({})),
         call("large-again", "fixture__large", json!({})),
         answer(""),
+        answer(""),
+        answer(""),
     ]);
     let (report, success) = run(
         dir.path(),
@@ -263,7 +278,7 @@ fn rejected_empty_compaction_preserves_full_original_and_reports_failure() {
     assert_ne!(report["stop_reason"], "completed");
     assert!(report["compactions"].as_array().is_none_or(Vec::is_empty));
     assert!(archive(&report).contains("ORIGINAL_BEYOND_64K"));
-    assert_eq!(requests.lock().unwrap().len(), 6);
+    assert_eq!(requests.lock().unwrap().len(), 8);
 }
 
 #[test]

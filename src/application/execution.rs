@@ -50,6 +50,8 @@ pub struct TurnRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compaction_attempts: Vec<CompactionAttempt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compactions: Vec<super::compaction::CompactionRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<super::transcript::TranscriptRef>,
@@ -74,6 +76,7 @@ pub struct ExecutionReport {
 impl Default for ExecutionReport {
     fn default() -> Self {
         Self {
+            compaction_attempts: Vec::new(),
             compactions: Vec::new(),
             transcript: None,
             working_state: None,
@@ -90,6 +93,36 @@ impl Default for ExecutionReport {
             validation: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionStatus {
+    Accepted,
+    Empty,
+    Oversized,
+    UnexpectedToolCalls,
+    ProviderError,
+    Cancelled,
+    TimeLimit,
+    InputTooLarge,
+    NonReducing,
+    DirectoryError,
+    ArchiveError,
+}
+
+/// Diagnostics survive temporary archive deletion without copying conversation content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionAttempt {
+    pub turn: usize,
+    pub attempt: usize,
+    pub status: CompactionStatus,
+    pub summary_bytes: Option<usize>,
+    pub max_summary_bytes: usize,
+    pub tool_call_count: usize,
+    pub archive_index: Option<u64>,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
 }
 
 impl ExecutionReport {
