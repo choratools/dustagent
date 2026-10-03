@@ -58,6 +58,9 @@ pub struct PackageMetadata {
 /// Agent-as-an-Application (AaaA) manifest configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AppManifest {
+    /// Context compaction policy; omitted uses conservative automatic defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<crate::application::compaction::CompactionConfig>,
     /// Opt-in execution-local JSON memo tools.
     #[serde(default, skip_serializing_if = "is_false")]
     pub working_state: bool,
@@ -132,6 +135,9 @@ impl AppManifest {
         let manifest: Self = serde_json::from_str(content)
             .map_err(|e| DustError::Manifest(format!("Failed to parse manifest JSON: {e}")))?;
         manifest.validate_native_namespace()?;
+        if let Some(config) = &manifest.compaction {
+            config.validate()?;
+        }
         if let Some(policy) = &manifest.provider_retry {
             policy.validate()?;
         }

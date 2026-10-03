@@ -49,6 +49,10 @@ pub struct TurnRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compactions: Vec<super::compaction::CompactionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<super::transcript::TranscriptRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_state: Option<super::state::WorkingState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -70,6 +74,8 @@ pub struct ExecutionReport {
 impl Default for ExecutionReport {
     fn default() -> Self {
         Self {
+            compactions: Vec::new(),
+            transcript: None,
             working_state: None,
             provider_retries: Vec::new(),
             validation_history: Vec::new(),

@@ -1,4 +1,5 @@
 pub mod builtin;
+mod context;
 pub mod fuzzy_patch;
 pub mod mcp_stdio;
 pub mod openai;

@@ -137,6 +137,9 @@ fn request(
 
 #[async_trait]
 impl LlmProvider for CodexProvider {
+    fn context_window_tokens(&self) -> Option<usize> {
+        super::context::codex_capacity(&self.model)
+    }
     async fn chat(
         &self,
         messages: &[ChatMessage],

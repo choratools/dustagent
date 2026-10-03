@@ -103,6 +103,13 @@ struct OpenAiWireToolFunction<'a> {
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
+    fn context_window_tokens(&self) -> Option<usize> {
+        if self.base_url == "https://api.openai.com/v1" {
+            super::context::official_capacity(&self.model)
+        } else {
+            None
+        }
+    }
     async fn chat(
         &self,
         messages: &[ChatMessage],

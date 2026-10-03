@@ -230,6 +230,18 @@ A package contains root `app.json`, its own `skills/`, and optional README/LICEN
 
 Skill access restrictions apply to the native skill reader. Explicit MCP servers and checkers keep their declared capabilities; this is not a process sandbox. Their executables/dependencies must already be installed, and relative command/checker paths still resolve from the caller's working directory. `allowed-tools` metadata does not grant execution permissions. See [package and skill guide](docs/14_앱_패키지_및_스킬.md).
 
+## Context compaction and original transcripts
+
+Dust keeps original messages and tool results in a private append-only JSONL archive, separate from the model-facing conversation. Automatic compaction summarizes older completed exchanges while preserving app instructions, the original/current request, and recent complete tool batches. Full tool outputs are archived before report/context truncation. When compaction is enabled, model-facing tool feedback has a smaller configurable-budget-derived cap and points to the original record; the report retains its existing evidence limits. Each compaction also stores a discovery directory: an unverified topic description, the original record range, literal keywords with record indexes, and previews. A bounded hint stays in context; older entries remain discoverable with `dustagent__history_directory`. Keywords and locations come from actual originals, without an extra model call. The model can inspect its own originals with `dustagent__history_search` and `dustagent__history_read`; these tools accept record indexes and pagination, rather than arbitrary file paths.
+
+```json
+{"compaction":{"enabled":true}}
+```
+
+Defaults derive from the configured model's context capacity, reserving 10% each (at least 1,024 tokens) for output and tool growth. Codex uses its local `models_cache.json` capacity hint; the official OpenAI endpoint uses a small exact-ID capacity table. Unknown/custom deployments use a conservative 32,768-token fallback; set `context_window_tokens` to their actual deployment limit. Recent complete exchanges are selected by estimated token budget, and the summary allowance scales with that budget. `trigger_tokens`, `keep_recent_messages`, and `max_summary_bytes` default to `0` (automatic); explicit legacy overrides still work. Token counting remains an approximate serialized UTF-8 byte estimate, not the provider's tokenizer. Compaction adds a model call only at the threshold, uses the same time/turn budget, and installs a summary only after it is valid and reduces context. Set `enabled:false` to disable automatic summaries; original recording remains enabled. Output checkers keep the existing bounded tool-evidence report; full originals remain in the separate archive.
+
+Archives live under `~/.dustagent/history` or `DUST_HISTORY_HOME`, with owner-only Unix permissions. Each execution or ACP session has its own archive. Reports expose the archive reference; checkpoints bind it by app/cwd, count, and content hash. Archives are not automatically deleted. History reads return up to 16 KiB per page. Storage limits stop execution instead of silently discarding originals. See [compaction and transcript guide](docs/18_컨텍스트_압축_및_원문_기록.md).
+
 ## Execution reports and budgets
 
 ```bash
@@ -396,6 +408,9 @@ Only the app's declared external MCP servers are started. Their tools are named 
 | `dustagent__uuid` | None | Generate a UUID v4 |
 | `dustagent__env_get` | `name` | Read an environment variable |
 | `dustagent__hash` | `input` | SHA-256 hex digest |
+| `dustagent__history_directory` | Optional `query`, `cursor`, `limit` | Discover archived topics, literal keywords and original record locations |
+| `dustagent__history_search` | `query`, optional `cursor`, `limit` | Search this execution/session's original messages |
+| `dustagent__history_read` | `index`, optional `offset`, `limit` | Read an original message with byte pagination |
 
 Scoped declarations keep unrelated external tools out of a task. They are not a sandbox: declared tools and checker commands retain their own capabilities, and native environment access remains available.
 

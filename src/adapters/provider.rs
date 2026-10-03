@@ -62,6 +62,12 @@ fn setting(name: &str) -> Result<Option<String>> {
 
 #[async_trait]
 impl LlmProvider for AutoProvider {
+    fn context_window_tokens(&self) -> Option<usize> {
+        match self {
+            Self::OpenAi(provider) => provider.context_window_tokens(),
+            Self::Codex(provider) => provider.context_window_tokens(),
+        }
+    }
     async fn chat(
         &self,
         messages: &[ChatMessage],

@@ -24,6 +24,8 @@ pub enum CheckpointPhase {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Checkpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<super::transcript::TranscriptRef>,
     pub version: u32,
     pub manifest_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,6 +70,7 @@ impl Checkpoint {
         cwd: &Path,
     ) -> Result<Self> {
         let checkpoint = Self {
+            transcript: None,
             version: 1,
             manifest_hash: manifest_hash(manifest)?,
             resource_hash: None,

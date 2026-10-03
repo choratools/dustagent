@@ -169,6 +169,10 @@ impl LlmResponse {
 /// Core port trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
+    /// Configured deployment's context capacity, when known. This is not token usage.
+    fn context_window_tokens(&self) -> Option<usize> {
+        None
+    }
     /// Sends a conversation history and optional tool definitions to the LLM,
     /// returning the model's response.
     async fn chat(
@@ -180,6 +184,9 @@ pub trait LlmProvider: Send + Sync {
 
 #[async_trait]
 impl<P: LlmProvider + ?Sized> LlmProvider for Box<P> {
+    fn context_window_tokens(&self) -> Option<usize> {
+        (**self).context_window_tokens()
+    }
     async fn chat(
         &self,
         messages: &[ChatMessage],
@@ -191,6 +198,9 @@ impl<P: LlmProvider + ?Sized> LlmProvider for Box<P> {
 
 #[async_trait]
 impl<P: LlmProvider + ?Sized> LlmProvider for std::sync::Arc<P> {
+    fn context_window_tokens(&self) -> Option<usize> {
+        (**self).context_window_tokens()
+    }
     async fn chat(
         &self,
         messages: &[ChatMessage],

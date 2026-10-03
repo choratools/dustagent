@@ -3,6 +3,7 @@ use super::{execution::ToolRecord, state::WorkingState};
 use crate::ports::llm::ChatMessage;
 #[derive(Debug, Default)]
 pub struct AgentSession {
+    pub(crate) transcript: Option<super::transcript::TranscriptRef>,
     pub(crate) messages: Vec<ChatMessage>,
     pub(crate) state: WorkingState,
     pub(crate) tool_calls: Vec<ToolRecord>,

@@ -134,7 +134,9 @@ async fn global_budget_wins_over_longer_tool_budget() {
         "dustagent__sleep",
         r#"{"ms":1000}"#,
     )]))]);
-    let mut core = DustCore::new(AppManifest::new(), provider).with_timeouts(20, 100);
+    // Allow transcript creation/fsync to finish before timing the 1s tool.
+    // The global deadline must still beat the longer per-tool deadline.
+    let mut core = DustCore::new(AppManifest::new(), provider).with_timeouts(200, 500);
     let report = core.execute_report("wait").await;
     assert_eq!(report.stop_reason, StopReason::TimeLimit);
     assert_eq!(report.tool_calls[0].status, ToolStatus::TimedOut);

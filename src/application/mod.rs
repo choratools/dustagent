@@ -24,3 +24,6 @@ pub mod state;
 
 pub mod events;
 pub mod session;
+
+pub mod compaction;
+pub mod transcript;
