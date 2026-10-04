@@ -10,7 +10,9 @@ pub use adapters::mcp_stdio::McpStdioClient;
 pub use adapters::openai::OpenAiProvider;
 pub use adapters::provider::AutoProvider;
 pub use application::core::DustCore;
-pub use domain::manifest::{AppManifest, McpServerConfig, PackageMetadata, resolve_manifest_path};
+pub use domain::manifest::{
+    AppManifest, McpChrootConfig, McpServerConfig, PackageMetadata, resolve_manifest_path,
+};
 pub use domain::patch::{LineRange, PatchError, SearchReplaceBlock, extract_blocks};
 pub use error::{DustError, ProviderFailure, Result};
 pub use ports::llm::{ChatMessage, LlmProvider, LlmResponse, ToolCall, ToolDefinition};

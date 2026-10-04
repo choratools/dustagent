@@ -54,6 +54,10 @@ impl McpStdioClient {
         if let Some(env_map) = env {
             cmd.envs(env_map);
         }
+        Self::spawn_command(cmd, command, inherit_stderr)
+    }
+
+    fn spawn_command(mut cmd: Command, command: &str, inherit_stderr: bool) -> Result<Self> {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         if inherit_stderr {
@@ -89,7 +93,44 @@ impl McpStdioClient {
 
     /// Spawns an uninitialized client from an `McpServerConfig`.
     pub fn from_config(config: &McpServerConfig) -> Result<Self> {
-        Self::spawn(&config.command, &config.args, config.env.as_ref())
+        Self::from_config_in(config, None)
+    }
+
+    fn from_config_in(config: &McpServerConfig, cwd: Option<&std::path::Path>) -> Result<Self> {
+        config.validate_chroot()?;
+        let Some(jail) = &config.chroot else {
+            return Self::spawn_in(
+                &config.command,
+                &config.args,
+                config.env.as_ref(),
+                false,
+                cwd,
+            );
+        };
+        // Resolve the host launcher without PATH lookup. Never fall back to an unjailed child.
+        let launcher = ["/usr/sbin/chroot", "/usr/bin/chroot", "/sbin/chroot"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+            .ok_or_else(|| {
+                DustError::Mcp("MCP chroot requires a GNU chroot executable on the host".into())
+            })?;
+        let (uid, gid) = jail.user.split_once(':').expect("validated uid:gid");
+        let mut cmd = Command::new(launcher);
+        cmd.env_clear().current_dir("/");
+        if let Some(env) = &config.env {
+            cmd.envs(env);
+        }
+        cmd.arg(format!("--userspec=+{uid}:+{gid}"))
+            .arg("--groups=")
+            .arg("--")
+            .arg(&jail.root)
+            .arg(&config.command)
+            .args(&config.args);
+        Self::spawn_command(
+            cmd,
+            &format!("{} (chroot {})", config.command, jail.root.display()),
+            true,
+        )
     }
 
     /// Spawns a child process and completes the MCP initialization handshake.
@@ -127,6 +168,19 @@ impl McpStdioClient {
     pub async fn from_config_and_init(config: &McpServerConfig) -> Result<Self> {
         let mut client = Self::from_config(config)?;
         client.initialize().await?;
+        Ok(client)
+    }
+
+    pub async fn from_config_and_init_in(
+        config: &McpServerConfig,
+        cwd: &std::path::Path,
+    ) -> Result<Self> {
+        let mut client = Self::from_config_in(config, Some(cwd))?;
+        client.initialize().await.map_err(|error| {
+            if config.chroot.is_some() {
+                DustError::Mcp(format!("Required MCP chroot initialization failed (check host chroot privileges and in-jail runtime/dependencies): {error}"))
+            } else { error }
+        })?;
         Ok(client)
     }
 

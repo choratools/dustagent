@@ -385,6 +385,9 @@ impl<P: LlmProvider> DustCore<P> {
     /// Starts ONLY the scoped MCP servers declared in the application manifest.
     pub async fn init_scoped_mcp(&mut self) -> Result<()> {
         self.manifest.validate_native_namespace()?;
+        for config in self.manifest.mcp_servers.values() {
+            config.validate_chroot()?;
+        }
         self.mcp_clients
             .entry("dustagent".into())
             .or_insert_with(|| Box::new(BuiltinToolClient::new()));
@@ -398,12 +401,7 @@ impl<P: LlmProvider> DustCore<P> {
                 (Instant::now() + Duration::from_millis(self.tool_timeout_ms.min(86_400_000)))
                     .min(deadline),
                 self.cancellation.clone(),
-                McpStdioClient::start_and_init_in(
-                    &config.command,
-                    &config.args,
-                    config.env.as_ref(),
-                    &cwd,
-                ),
+                McpStdioClient::from_config_and_init_in(config, &cwd),
             )
             .await
             {
@@ -411,6 +409,11 @@ impl<P: LlmProvider> DustCore<P> {
                     self.mcp_clients.insert(name.clone(), Box::new(client));
                 }
                 Ok(Err(err)) => {
+                    if config.chroot.is_some() {
+                        return Err(DustError::Mcp(format!(
+                            "Required jailed MCP server '{name}' failed: {err}"
+                        )));
+                    }
                     self.lifecycle_warnings
                         .push(format!("Failed to launch MCP server {name}: {err}"));
                     eprintln!("[dustagent] Warning: Failed to launch MCP server '{name}': {err}");
@@ -418,6 +421,11 @@ impl<P: LlmProvider> DustCore<P> {
                 }
                 Err(WaitError::Cancelled) => {
                     return Err(DustError::Mcp("MCP initialization cancelled".into()));
+                }
+                Err(_) if config.chroot.is_some() => {
+                    return Err(DustError::Mcp(format!(
+                        "Required jailed MCP server '{name}' initialization deadline exceeded"
+                    )));
                 }
                 Err(_) => self.lifecycle_warnings.push(format!(
                     "MCP server initialization deadline exceeded: {name}"
@@ -449,12 +457,32 @@ impl<P: LlmProvider> DustCore<P> {
                     }
                 }
                 Ok(Err(err)) => {
+                    if self
+                        .manifest
+                        .mcp_servers
+                        .get(srv_name)
+                        .is_some_and(|config| config.chroot.is_some())
+                    {
+                        return Err(DustError::Mcp(format!(
+                            "Required jailed MCP server '{srv_name}' tool discovery failed: {err}"
+                        )));
+                    }
                     self.lifecycle_warnings
                         .push(format!("Failed to list tools from {srv_name}: {err}"));
                     eprintln!("[dustagent] Warning: Failed to list tools from '{srv_name}': {err}");
                     warn!("Failed to list tools from '{srv_name}': {err}");
                 }
                 Err(_) => {
+                    if self
+                        .manifest
+                        .mcp_servers
+                        .get(srv_name)
+                        .is_some_and(|config| config.chroot.is_some())
+                    {
+                        return Err(DustError::Mcp(format!(
+                            "Required jailed MCP server '{srv_name}' tool discovery deadline exceeded"
+                        )));
+                    }
                     self.lifecycle_warnings
                         .push(format!("Tool discovery deadline exceeded: {srv_name}"));
                     poisoned.push(srv_name.clone());

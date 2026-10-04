@@ -83,3 +83,5 @@ graph LR
 - [[17_Codex_인증_및_모델_연결]] — 자동 provider 선택, Codex 캐시와 토큰 갱신
 
 - [[18_컨텍스트_압축_및_원문_기록]] — 모델용 대화 compact, 원문 JSONL 보존과 내장 조회 도구
+
+- [[19_MCP_chroot]] — stdio MCP별 준비된 파일시스템 루트, 실행 권한과 실패 경계

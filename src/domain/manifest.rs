@@ -16,6 +16,17 @@ pub struct McpServerConfig {
     /// Optional environment variables for the child process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
+    /// Opt-in Linux filesystem jail for this server only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chroot: Option<McpChrootConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpChrootConfig {
+    pub root: PathBuf,
+    /// Numeric, non-root uid:gid used inside the jail.
+    pub user: String,
 }
 
 impl McpServerConfig {
@@ -25,6 +36,7 @@ impl McpServerConfig {
             command: command.into(),
             args: Vec::new(),
             env: None,
+            chroot: None,
         }
     }
 
@@ -42,6 +54,58 @@ impl McpServerConfig {
     pub fn with_env(mut self, env: HashMap<String, String>) -> Self {
         self.env = Some(env);
         self
+    }
+
+    pub fn validate_chroot(&self) -> Result<()> {
+        let Some(jail) = &self.chroot else {
+            return Ok(());
+        };
+        if !cfg!(target_os = "linux") {
+            return Err(DustError::Manifest(
+                "MCP chroot is supported only on Linux".into(),
+            ));
+        }
+        if !jail.root.is_absolute() || !jail.root.is_dir() {
+            return Err(DustError::Manifest(
+                "MCP chroot root must be an absolute existing directory".into(),
+            ));
+        }
+        if std::fs::canonicalize(&jail.root)? == Path::new("/") {
+            return Err(DustError::Manifest(
+                "MCP chroot root must not be the host root /".into(),
+            ));
+        }
+        let valid_id = |id: &str| {
+            !id.is_empty()
+                && id.bytes().all(|b| b.is_ascii_digit())
+                && id.parse::<u32>().is_ok_and(|id| id > 0 && id < u32::MAX)
+        };
+        let valid_user = jail
+            .user
+            .split_once(':')
+            .is_some_and(|(uid, gid)| valid_id(uid) && valid_id(gid));
+        if !valid_user {
+            return Err(DustError::Manifest(
+                "MCP chroot user must be non-root numeric uid:gid".into(),
+            ));
+        }
+        if !Path::new(&self.command).is_absolute() {
+            return Err(DustError::Manifest(
+                "MCP chroot command must be an absolute path inside the jail".into(),
+            ));
+        }
+        if self.env.as_ref().is_some_and(|env| {
+            env.keys().any(|name| {
+                name.starts_with("LD_")
+                    || matches!(
+                        name.as_str(),
+                        "GLIBC_TUNABLES" | "GCONV_PATH" | "LOCPATH" | "NLSPATH"
+                    )
+            })
+        }) {
+            return Err(DustError::Manifest("MCP chroot env cannot configure the host loader (LD_*, GLIBC_TUNABLES, GCONV_PATH, LOCPATH, NLSPATH)".into()));
+        }
+        Ok(())
     }
 }
 
@@ -135,6 +199,9 @@ impl AppManifest {
         let manifest: Self = serde_json::from_str(content)
             .map_err(|e| DustError::Manifest(format!("Failed to parse manifest JSON: {e}")))?;
         manifest.validate_native_namespace()?;
+        for config in manifest.mcp_servers.values() {
+            config.validate_chroot()?;
+        }
         if let Some(config) = &manifest.compaction {
             config.validate()?;
         }

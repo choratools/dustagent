@@ -416,6 +416,27 @@ Only the app's declared external MCP servers are started. Their tools are named 
 
 Scoped declarations keep unrelated external tools out of a task. They are not a sandbox: declared tools and checker commands retain their own capabilities, and native environment access remains available.
 
+### Optional stdio MCP chroot (Linux)
+
+An individual MCP server can run in a prepared filesystem root:
+
+```json
+{
+  "mcp_servers": {
+    "files": {
+      "command": "/usr/bin/node",
+      "args": ["/mcp/server.js", "/workspace"],
+      "chroot": { "root": "/srv/dust-jails/files", "user": "1000:1000" },
+      "env": { "HOME": "/tmp", "PATH": "/usr/bin:/bin" }
+    }
+  }
+}
+```
+
+`root` is a host path; command and argument paths are inside the jail. Supply the executable, libraries, MCP code and dependencies (including `node_modules`) there beforehand. Dust does not copy files, mount paths, install packages or elevate privileges. GNU `chroot` must be available and the launcher must have permission to use it. The server runs as the specified non-root UID/GID, starts in `/`, and receives only its explicit `env`. A configured jail that cannot start or initialize stops app startup; there is no host fallback.
+
+This restricts the configured server's filesystem view. It does not isolate networking or processes, jail Dust's native tools/checkers, or constrain other servers without `chroot`. See [setup and boundaries](docs/19_MCP_chroot.md).
+
 ## Patch a file
 
 ```bash
