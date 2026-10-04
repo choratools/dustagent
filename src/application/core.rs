@@ -528,7 +528,10 @@ impl<P: LlmProvider> DustCore<P> {
                 let _ = timeout(Duration::from_millis(100), client.close()).await;
             }
         }
-        if self.skills.is_some() && !self.manifest.skills.is_empty() {
+        if self.skills.is_some()
+            && !self.manifest.skills.is_empty()
+            && self.model_skill_config().allows_lookup()
+        {
             tools.push(ToolDefinition::new("dustagent__read_skill", "Read this app's declared SKILL.md or a text file in its references/, scripts/, assets/. Scripts are never executed.", serde_json::json!({"type":"object","properties":{"skill":{"type":"string"},"path":{"type":"string"}},"required":["skill"],"additionalProperties":false})));
         }
         if self.manifest.working_state {
@@ -662,6 +665,11 @@ impl<P: LlmProvider> DustCore<P> {
             });
         }
         if full_tool_name == "dustagent__read_skill" {
+            if !self.model_skill_config().allows_lookup() {
+                return Err(DustError::Config(
+                    "Skill lookup is disabled because SKILL.md and references are preloaded".into(),
+                ));
+            }
             let catalog = self
                 .skills
                 .as_ref()

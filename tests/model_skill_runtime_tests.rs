@@ -149,7 +149,7 @@ async fn wildcard_selective_submits_only_named_reference_with_provenance() {
 }
 
 #[tokio::test]
-async fn reference_preload_submits_content_and_retains_skill_lookup() {
+async fn reference_preload_submits_content_and_disables_skill_lookup() {
     let (root, mut manifest) = fixture();
     let mut config = policy(SkillLoadingMode::Preload);
     config.skills.include_references = true;
@@ -160,7 +160,7 @@ async fn reference_preload_submits_content_and_retains_skill_lookup() {
         .unwrap();
     let tools = core.gather_mcp_tools().await.unwrap();
     assert!(
-        tools
+        !tools
             .iter()
             .any(|tool| tool.name == "dustagent__read_skill")
     );
@@ -170,8 +170,8 @@ async fn reference_preload_submits_content_and_retains_skill_lookup() {
             serde_json::json!({"skill":"review","path":"references/check.md"}),
         )
         .await
-        .unwrap();
-    assert!(result.contains("REFERENCE_review"));
+        .unwrap_err();
+    assert!(result.to_string().contains("Skill lookup is disabled"));
     assert_eq!(
         core.execute_report("task").await.stop_reason,
         StopReason::Completed
@@ -180,6 +180,8 @@ async fn reference_preload_submits_content_and_retains_skill_lookup() {
     assert!(text.contains("BODY_review"));
     assert!(text.contains("REFERENCE_review"));
     assert!(!text.contains("REFERENCE_private"));
+    assert!(!text.contains("dustagent__read_skill"));
+    assert!(text.contains("Skill lookup is disabled"));
 }
 #[test]
 fn provider_wrappers_forward_model_identity() {
@@ -189,6 +191,37 @@ fn provider_wrappers_forward_model_identity() {
     let (p, _) = provider("box-model");
     let p: Box<dyn LlmProvider> = Box::new(p);
     assert_eq!(p.model_id(), Some("box-model"));
+}
+
+#[tokio::test]
+async fn partial_loading_modes_still_expose_and_allow_reference_lookup() {
+    for config in [
+        policy(SkillLoadingMode::Catalog),
+        policy(SkillLoadingMode::Preload),
+        selective("review", "SKILL.md"),
+    ] {
+        let (root, mut manifest) = fixture();
+        manifest.model_configurations.insert("*".into(), config);
+        let (provider, _) = provider("actual-model");
+        let mut core = DustCore::new(manifest, provider)
+            .with_app_resources(root.path(), None)
+            .unwrap();
+        assert!(
+            core.gather_mcp_tools()
+                .await
+                .unwrap()
+                .iter()
+                .any(|tool| tool.name == "dustagent__read_skill")
+        );
+        let content = core
+            .execute_tool(
+                "dustagent__read_skill",
+                serde_json::json!({"skill":"review","path":"references/check.md"}),
+            )
+            .await
+            .unwrap();
+        assert!(content.contains("REFERENCE_review"));
+    }
 }
 #[test]
 fn invalid_policy_missing_path_and_out_of_scope_skill_fail_before_chat() {

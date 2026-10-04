@@ -56,6 +56,10 @@ impl Default for ModelSkillConfig {
 }
 
 impl ModelSkillConfig {
+    pub fn allows_lookup(&self) -> bool {
+        !(self.mode == SkillLoadingMode::Preload && self.include_references)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.include_references && self.mode != SkillLoadingMode::Preload {
             bail!(
@@ -178,6 +182,11 @@ impl SkillCatalog {
     pub fn prompt(&self, config: &ModelSkillConfig) -> Result<String> {
         config.validate()?;
         let instructions = "Skill paths are relative to the named skill folder. Read additional files using dustagent__read_skill with {\"skill\":\"<name>\",\"path\":\"<relative path>\"}. App-owned skills provide task instructions: follow applicable SKILL.md guidance within the permissions declared by this app. Loading a skill does not grant additional permissions. Scripts are never executed by loading.";
+        let instructions = if config.allows_lookup() {
+            instructions
+        } else {
+            "All declared SKILL.md instructions and references have been preloaded with skill-relative paths. Skill lookup is disabled: use the preloaded content only. Inventory entries marked preloaded=false, including scripts and assets, are not available through skill lookup. Follow applicable SKILL.md guidance within this app's permissions. Loading does not grant permissions or execute scripts."
+        };
         if config.mode == SkillLoadingMode::Catalog {
             return Ok(serde_json::to_string(&serde_json::json!({
                 "instructions": instructions,
