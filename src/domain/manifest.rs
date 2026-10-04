@@ -119,9 +119,20 @@ pub struct PackageMetadata {
     pub dust_version: Option<String>,
 }
 
+/// Per-model input presentation policy; app capabilities remain unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ModelConfiguration {
+    #[serde(default)]
+    pub skills: crate::application::skills::ModelSkillConfig,
+}
+
 /// Agent-as-an-Application (AaaA) manifest configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AppManifest {
+    /// Exact actual model IDs; "*" is the optional fallback.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_configurations: HashMap<String, ModelConfiguration>,
     /// Context compaction policy; omitted uses conservative automatic defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<crate::application::compaction::CompactionConfig>,
@@ -199,6 +210,7 @@ impl AppManifest {
         let manifest: Self = serde_json::from_str(content)
             .map_err(|e| DustError::Manifest(format!("Failed to parse manifest JSON: {e}")))?;
         manifest.validate_native_namespace()?;
+        manifest.validate_model_configurations()?;
         for config in manifest.mcp_servers.values() {
             config.validate_chroot()?;
         }
@@ -209,6 +221,25 @@ impl AppManifest {
             policy.validate()?;
         }
         Ok(manifest)
+    }
+
+    pub fn validate_model_configurations(&self) -> Result<()> {
+        if self.model_configurations.len() > 128 {
+            return Err(DustError::Manifest(
+                "At most 128 model configurations are allowed".into(),
+            ));
+        }
+        for (model, config) in &self.model_configurations {
+            if model.is_empty() || model.len() > 256 || model.trim() != model {
+                return Err(DustError::Manifest(
+                    "Model configuration keys must be nonempty model IDs or *".into(),
+                ));
+            }
+            config.skills.validate().map_err(|error| {
+                DustError::Manifest(format!("Invalid model configuration {model}: {error:#}"))
+            })?;
+        }
+        Ok(())
     }
 
     /// Native tool namespace cannot be replaced by a configured MCP server.

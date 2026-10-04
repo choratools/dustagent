@@ -395,13 +395,6 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
     let current_dir = std::env::current_dir()?;
     let loaded_app = dustagent::application::package::load(&args.app, &current_dir)?;
     let manifest = loaded_app.manifest.clone();
-    let catalog =
-        dustagent::application::skills::SkillCatalog::load(&loaded_app.root, &manifest.skills)?;
-    let resource_hash = dustagent::application::core::resource_hash(
-        loaded_app.digest.as_deref(),
-        &catalog,
-        !manifest.skills.is_empty(),
-    );
     let checkpoint_path = args.resume.as_ref().or(args.checkpoint.as_ref());
     let checkpoint_guard = checkpoint_path
         .map(|path| acquire_checkpoint_lease(path))
@@ -427,7 +420,6 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
         let checkpoint =
             dustagent::application::checkpoint::load(checkpoint_path.as_ref().unwrap())?;
         checkpoint.validate_for(&manifest)?;
-        checkpoint.validate_resources(resource_hash.as_deref())?;
         checkpoint.ensure_resumable()?;
         Some(checkpoint)
     } else {
@@ -463,6 +455,9 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
     let mut core = DustCore::new(manifest.clone(), provider)
         .with_timeouts(timeout_ms, tool_timeout_ms)
         .with_app_resources(&loaded_app.root, loaded_app.digest.as_deref())?;
+    if let Some(checkpoint) = &resumed {
+        checkpoint.validate_resources(core.app_resource_hash())?;
+    }
     if let Some(path) = &checkpoint_path {
         core = core.with_checkpoint(path);
     }

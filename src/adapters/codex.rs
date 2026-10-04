@@ -137,6 +137,9 @@ fn request(
 
 #[async_trait]
 impl LlmProvider for CodexProvider {
+    fn model_id(&self) -> Option<&str> {
+        Some(self.model())
+    }
     fn context_window_tokens(&self) -> Option<usize> {
         super::context::codex_capacity(&self.model)
     }

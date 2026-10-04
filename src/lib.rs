@@ -10,8 +10,10 @@ pub use adapters::mcp_stdio::McpStdioClient;
 pub use adapters::openai::OpenAiProvider;
 pub use adapters::provider::AutoProvider;
 pub use application::core::DustCore;
+pub use application::skills::{ModelSkillConfig, SkillInclude, SkillLoadingMode};
 pub use domain::manifest::{
-    AppManifest, McpChrootConfig, McpServerConfig, PackageMetadata, resolve_manifest_path,
+    AppManifest, McpChrootConfig, McpServerConfig, ModelConfiguration, PackageMetadata,
+    resolve_manifest_path,
 };
 pub use domain::patch::{LineRange, PatchError, SearchReplaceBlock, extract_blocks};
 pub use error::{DustError, ProviderFailure, Result};

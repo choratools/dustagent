@@ -169,6 +169,10 @@ impl LlmResponse {
 /// Core port trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
+    /// Actual selected model identifier, when the provider exposes it.
+    fn model_id(&self) -> Option<&str> {
+        None
+    }
     /// Configured deployment's context capacity, when known. This is not token usage.
     fn context_window_tokens(&self) -> Option<usize> {
         None
@@ -184,6 +188,9 @@ pub trait LlmProvider: Send + Sync {
 
 #[async_trait]
 impl<P: LlmProvider + ?Sized> LlmProvider for Box<P> {
+    fn model_id(&self) -> Option<&str> {
+        (**self).model_id()
+    }
     fn context_window_tokens(&self) -> Option<usize> {
         (**self).context_window_tokens()
     }
@@ -198,6 +205,9 @@ impl<P: LlmProvider + ?Sized> LlmProvider for Box<P> {
 
 #[async_trait]
 impl<P: LlmProvider + ?Sized> LlmProvider for std::sync::Arc<P> {
+    fn model_id(&self) -> Option<&str> {
+        (**self).model_id()
+    }
     fn context_window_tokens(&self) -> Option<usize> {
         (**self).context_window_tokens()
     }

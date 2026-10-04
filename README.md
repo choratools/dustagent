@@ -230,6 +230,31 @@ A package contains root `app.json`, its own `skills/`, and optional README/LICEN
 
 Skill access restrictions apply to the native skill reader. Explicit MCP servers and checkers keep their declared capabilities; this is not a process sandbox. Their executables/dependencies must already be installed, and relative command/checker paths still resolve from the caller's working directory. `allowed-tools` metadata does not grant execution permissions. See [package and skill guide](docs/14_앱_패키지_및_스킬.md).
 
+### Model-specific skill loading
+
+Configure skill delivery in `app.json` by actual model ID. An exact match wins over `*`; absent configuration keeps the default `catalog` mode. `--model` and ACP model selection choose the matching policy.
+
+```json
+{
+  "skills": ["source-review", "reporting"],
+  "model_configurations": {
+    "*": { "skills": { "mode": "catalog" } },
+    "gpt-6.1-sol": {
+      "skills": {
+        "mode": "selective",
+        "include": [
+          { "skill": "source-review", "paths": ["SKILL.md"] },
+          { "skill": "reporting", "paths": ["references/output-format.md"] }
+        ],
+        "max_preload_bytes": 32768
+      }
+    }
+  }
+}
+```
+
+`catalog` sends names and descriptions only. `preload` adds every declared `SKILL.md`; `selective` adds exactly the specified files. Preload modes include a relative resource inventory, per-file skill/path provenance and an indication of which files are already included. Other text resources remain available through `dustagent__read_skill`; scripts are never executed by loading. Missing, undeclared or invalid selected resources and oversized preload payloads fail before model execution. The 32 KiB default budget (configurable up to 256 KiB) covers the complete serialized skill prompt in preload modes. Catalog mode retains its existing metadata bounds. See [configuration and resume behavior](docs/20_모델별_스킬_로딩.md).
+
 ## Context compaction and original transcripts
 
 Dust keeps original messages and tool results in a private append-only JSONL archive, separate from the model-facing conversation. Automatic compaction summarizes older completed exchanges while preserving app instructions, the original/current request, and recent complete tool batches. Full tool outputs are archived before report/context truncation. When compaction is enabled, model-facing tool feedback has a smaller configurable-budget-derived cap and points to the original record; the report retains its existing evidence limits. Each compaction also stores a discovery directory: an unverified topic description, the original record range, literal keywords with record indexes, and previews. A bounded hint stays in context; older entries remain discoverable with `dustagent__history_directory`. Keywords and locations come from actual originals, without an extra model call. The model can inspect its own originals with `dustagent__history_search` and `dustagent__history_read`; these tools accept record indexes and pagination, rather than arbitrary file paths.

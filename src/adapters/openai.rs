@@ -103,6 +103,9 @@ struct OpenAiWireToolFunction<'a> {
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
+    fn model_id(&self) -> Option<&str> {
+        Some(self.model())
+    }
     fn context_window_tokens(&self) -> Option<usize> {
         if self.base_url == "https://api.openai.com/v1" {
             super::context::official_capacity(&self.model)

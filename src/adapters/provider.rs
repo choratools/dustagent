@@ -62,6 +62,9 @@ fn setting(name: &str) -> Result<Option<String>> {
 
 #[async_trait]
 impl LlmProvider for AutoProvider {
+    fn model_id(&self) -> Option<&str> {
+        Some(self.model())
+    }
     fn context_window_tokens(&self) -> Option<usize> {
         match self {
             Self::OpenAi(provider) => provider.context_window_tokens(),
