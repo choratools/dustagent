@@ -49,6 +49,9 @@ pub struct TurnRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionReport {
+    /// Assigned checkpoint destination; startup errors may occur before it is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_path: Option<std::path::PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compaction_attempts: Vec<CompactionAttempt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -76,6 +79,7 @@ pub struct ExecutionReport {
 impl Default for ExecutionReport {
     fn default() -> Self {
         Self {
+            checkpoint_path: None,
             compaction_attempts: Vec::new(),
             compactions: Vec::new(),
             transcript: None,

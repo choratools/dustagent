@@ -133,7 +133,7 @@ struct RunArgs {
     #[arg(long)]
     report: Option<PathBuf>,
 
-    /// Persist resumable conversation checkpoints during execution
+    /// Checkpoint destination (default: a unique persistent temporary directory)
     #[arg(long, conflicts_with = "resume")]
     checkpoint: Option<PathBuf>,
 
@@ -395,7 +395,23 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
     let current_dir = std::env::current_dir()?;
     let loaded_app = dustagent::application::package::load(&args.app, &current_dir)?;
     let manifest = loaded_app.manifest.clone();
-    let checkpoint_path = args.resume.as_ref().or(args.checkpoint.as_ref());
+    let automatic_checkpoint = if args.resume.is_none() && args.checkpoint.is_none() {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("dust-run-");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        Some(builder.tempdir()?.keep().join("state.json"))
+    } else {
+        None
+    };
+    let checkpoint_path = args
+        .resume
+        .as_ref()
+        .or(args.checkpoint.as_ref())
+        .or(automatic_checkpoint.as_ref());
     let checkpoint_guard = checkpoint_path
         .map(|path| acquire_checkpoint_lease(path))
         .transpose()?;
@@ -404,6 +420,7 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
         if args.checkpoint.is_some() && checkpoint_path.exists() {
             anyhow::bail!("Checkpoint already exists; use --resume or a new path");
         }
+        eprintln!("[dustagent] checkpoint: {}", checkpoint_path.display());
         if let Some(report_path) = &args.report {
             let normalized = normalize_artifact_path(report_path)?;
             if normalized == *checkpoint_path {
@@ -537,6 +554,7 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
         report.warnings.push(format!("Shutdown: {err}"));
     }
     report.warnings.extend(warnings);
+    report.checkpoint_path = checkpoint_path.clone();
     let prior_elapsed = resumed
         .as_ref()
         .map_or(0, |checkpoint| checkpoint.report.elapsed_ms);

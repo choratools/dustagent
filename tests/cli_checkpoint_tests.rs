@@ -71,6 +71,140 @@ fn command(dir: &std::path::Path, app: &std::path::Path, url: &str) -> Command {
 fn tool_message() -> Value {
     json!({"role":"assistant","content":"observing", "tool_calls":[{"id":"call1","type":"function","function":{"name":"dustagent__hash","arguments":"{\"input\":\"observed body\"}"}}]})
 }
+
+fn announced_checkpoint(output: &std::process::Output) -> std::path::PathBuf {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let path = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("[dustagent] checkpoint: "))
+        .unwrap_or_else(|| panic!("checkpoint path missing from stderr: {stderr}"));
+    let path = std::path::PathBuf::from(path);
+    assert!(path.is_absolute());
+    path
+}
+
+#[test]
+fn default_runs_preserve_unique_private_checkpoints_without_changing_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = manifest(dir.path());
+    let temp_root = dir.path().join("runtime-tmp");
+    std::fs::create_dir(&temp_root).unwrap();
+    let (url, calls, _) = serve(vec![
+        (json!({"role":"assistant","content":"done"}), Duration::ZERO),
+        (json!({"role":"assistant","content":"done"}), Duration::ZERO),
+    ]);
+    let json_output = command(dir.path(), &app, &url)
+        .env("TMPDIR", &temp_root)
+        .args(["--json", "input"])
+        .output()
+        .unwrap();
+    assert!(json_output.status.success(), "{:?}", json_output);
+    let first_path = announced_checkpoint(&json_output);
+    let first_report: Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(
+        first_report["checkpoint_path"],
+        first_path.to_str().unwrap()
+    );
+    let plain_output = command(dir.path(), &app, &url)
+        .env("TMPDIR", &temp_root)
+        .args(["--report", "plain-report.json", "input"])
+        .output()
+        .unwrap();
+    assert!(plain_output.status.success(), "{:?}", plain_output);
+    assert_eq!(
+        String::from_utf8(plain_output.stdout.clone())
+            .unwrap()
+            .trim(),
+        "done"
+    );
+    let second_path = announced_checkpoint(&plain_output);
+    let second_report: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("plain-report.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        second_report["checkpoint_path"],
+        second_path.to_str().unwrap()
+    );
+    assert_ne!(first_path, second_path);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    for path in [first_path, second_path] {
+        assert!(path.starts_with(&temp_root));
+        assert_eq!(path.file_name().unwrap(), "state.json");
+        assert!(
+            path.parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("dust-run-")
+        );
+        let saved = dustagent::application::checkpoint::load(&path).unwrap();
+        assert_eq!(saved.phase, dustagent::CheckpointPhase::Finished);
+        assert_eq!(saved.report.output.as_deref(), Some("done"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+}
+
+#[test]
+fn default_checkpoint_can_resume_in_a_fresh_process_without_replaying_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = manifest(dir.path());
+    let (url, _, _) = serve(vec![(tool_message(), Duration::ZERO)]);
+    let first = command(dir.path(), &app, &url)
+        .env("TMPDIR", dir.path())
+        .args(["--json", "--max-turns", "1", "original automatic input"])
+        .output()
+        .unwrap();
+    assert_eq!(first.status.code(), Some(2));
+    let path = announced_checkpoint(&first);
+    let first_report: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first_report["checkpoint_path"], path.to_str().unwrap());
+    let (url, _, captured) = serve(vec![(
+        json!({"role":"assistant","content":"resumed automatic run"}),
+        Duration::ZERO,
+    )]);
+    let resumed = command(dir.path(), &app, &url)
+        .env("TMPDIR", dir.path())
+        .args([
+            "--json",
+            "--resume",
+            path.to_str().unwrap(),
+            "--max-turns",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(resumed.status.success(), "{:?}", resumed);
+    let report: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(report["checkpoint_path"], path.to_str().unwrap());
+    assert_eq!(report["turns_used"], 2);
+    assert_eq!(report["tool_calls"].as_array().unwrap().len(), 1);
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]["messages"][1]["content"],
+        "original automatic input"
+    );
+    assert_eq!(requests[0]["messages"][3]["role"], "tool");
+    let saved = dustagent::application::checkpoint::load(&path).unwrap();
+    assert_eq!(saved.phase, dustagent::CheckpointPhase::Finished);
+}
 #[test]
 fn fresh_process_resumes_original_transcript_with_additional_budget() {
     let dir = tempfile::tempdir().unwrap();

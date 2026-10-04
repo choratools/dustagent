@@ -136,7 +136,7 @@ git diff --cached | dust run commit_gen
 | `--tool-timeout-ms MS` | Set the individual tool timeout |
 | `--json` | Emit a structured report, including incomplete results |
 | `--report PATH` | Save the termination report to a file |
-| `--checkpoint PATH` | Save conversation checkpoints during execution; requires a new file |
+| `--checkpoint PATH` | Override the automatic temporary checkpoint destination; requires a new file |
 | `--resume PATH` | Resume a safe checkpoint using its original input and conversation |
 | `--experience` | Record runs and review/reuse useful past examples |
 | `--experience-dir PATH` | Override the experience directory; implies `--experience` |
@@ -303,7 +303,17 @@ Timed-out MCP clients are discarded to avoid consuming a late response as a late
 
 Library callers use `execute_report()` or `execute_report_with_experience()` for structured results. Existing `execute()` methods return errors on incomplete execution. Library execution budgets cover discovery and execution; initialization is separately bounded. `completed` describes the execution contract, not exhaustive crawl coverage or factual correctness.
 
-Reports are written at termination. Use a separate checkpoint to retain the conversation during execution:
+Reports are written at termination. Each fresh CLI `run` automatically keeps a checkpoint under the system temporary directory, for example `/tmp/dust-run-XXXXXX/state.json` (`TMPDIR` can change the temporary root). The private directory and checkpoint survive process exit. STDERR announces the path, and JSON reports expose `checkpoint_path`; plain task output on STDOUT is unchanged. The path is an assigned destination: startup errors can occur before a checkpoint is written. Temporary-system cleanup or manual deletion removes it, so use an explicit path for longer retention. This adds checkpoint file writes during execution, not extra model calls. Library and ACP sessions do not automatically create these temporary checkpoints.
+
+Use the reported path with `--resume`, or choose a destination explicitly:
+
+```bash
+dust run crawler --max-turns 1 --report run-report.json "https://example.com"
+# After a resumable stop, read checkpoint_path from run-report.json.
+dust run crawler --resume /tmp/dust-run-XXXXXX/state.json --max-turns 10 --json
+```
+
+The temporary path above is illustrative; use the actual reported path. Completed or unsafe interrupted runs remain non-resumable.
 
 ```bash
 dust run crawler --checkpoint state/crawl.json --max-turns 10 "https://example.com"

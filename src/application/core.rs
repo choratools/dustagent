@@ -328,6 +328,7 @@ impl<P: LlmProvider> DustCore<P> {
         started: Instant,
         prior_ms: u64,
     ) -> bool {
+        report.checkpoint_path = self.checkpoint_path.clone();
         if self.session_mode {
             self.session_messages = messages.to_vec();
             self.session_phase = phase;

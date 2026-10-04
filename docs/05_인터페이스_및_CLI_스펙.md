@@ -36,11 +36,13 @@ git diff --cached | dust run commit_gen
 
 run은 INPUT이 없으면 STDIN을 읽는다. 옵션은 입력 문장 앞에 둔다. --resume은 원래 입력을 체크포인트에서 읽으며 새 입력을 허용하지 않는다. 모델은 --model/-m으로 지정한다. API 설정은 OPENAI_API_KEY와 선택적 OPENAI_BASE_URL을 사용한다. 둘 다 없으면 Codex 파일 인증 캐시를 읽는다. 자세한 선택·갱신 계약은 [[17_Codex_인증_및_모델_연결]]을 참고한다.
 
+새 CLI run은 경로를 지정하지 않으면 시스템 임시 디렉터리의 고유한 `dust-run-XXXXXX/state.json`에 체크포인트를 저장한다. 경로는 stderr와 보고서의 `checkpoint_path`에 표시하고 종료 후에도 보존한다. 명시한 경로가 우선하며, 초기화 실패 시 아직 파일이 없을 수 있다. 자세한 권한·재개 가능 상태는 [[13_체크포인트_및_재개]]를 참고한다.
+
 | run 옵션 | 의미 |
 | --- | --- |
 | --json | 미완료 실행도 구조화된 보고서로 STDOUT 출력 |
 | --report PATH | 종료 보고서를 별도 파일로 저장 |
-| --checkpoint PATH | 실행 경계에서 대화와 도구 결과 저장; 새 파일 필요 |
+| --checkpoint PATH | 자동 임시 체크포인트 대신 지정 경로에 저장; 새 파일 필요 |
 | --resume PATH | 안전한 체크포인트 재개; --checkpoint와 동시 사용 불가 |
 | --max-turns N | 이번 호출의 모델 턴 예산 |
 | --timeout-ms MS | 시작·경험 검토·모델·도구의 전체 시간 예산 |
