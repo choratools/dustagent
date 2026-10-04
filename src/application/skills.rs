@@ -34,7 +34,14 @@ pub struct SkillInclude {
 pub struct ModelSkillConfig {
     pub mode: SkillLoadingMode,
     pub include: Vec<SkillInclude>,
+    /// In preload mode, also include all references/ text files recursively.
+    #[serde(skip_serializing_if = "is_false")]
+    pub include_references: bool,
     pub max_preload_bytes: usize,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl Default for ModelSkillConfig {
@@ -42,6 +49,7 @@ impl Default for ModelSkillConfig {
         Self {
             mode: SkillLoadingMode::Catalog,
             include: Vec::new(),
+            include_references: false,
             max_preload_bytes: 32768,
         }
     }
@@ -49,6 +57,11 @@ impl Default for ModelSkillConfig {
 
 impl ModelSkillConfig {
     pub fn validate(&self) -> Result<()> {
+        if self.include_references && self.mode != SkillLoadingMode::Preload {
+            bail!(
+                "skills.include_references requires preload mode; selective mode uses explicit paths"
+            );
+        }
         if self.max_preload_bytes == 0 || self.max_preload_bytes > 262144 {
             bail!("skills.max_preload_bytes must be between 1 and 262144");
         }
@@ -199,6 +212,9 @@ impl SkillCatalog {
             let mut files = Vec::new();
             inventory(&skill.directory, &skill.directory, &mut files, &mut count)?;
             for path in files {
+                if config.include_references && path.starts_with("references/") {
+                    selected.insert((name.clone(), path.clone()));
+                }
                 let preloaded = selected.contains(&(name.clone(), path.clone()));
                 resources.push(serde_json::json!({"skill":name,"path":path,"preloaded":preloaded}));
             }

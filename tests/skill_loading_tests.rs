@@ -94,6 +94,60 @@ fn selective_loads_exact_files_without_executing_scripts() {
     assert_eq!(parsed["preloaded"].as_array().unwrap().len(), 2);
     assert_eq!(parsed["resources"][0]["preloaded"], false);
 }
+
+#[test]
+fn preload_can_include_nested_references_but_not_scripts_or_undeclared_skills() {
+    let (root, _) = fixture();
+    let references = root.path().join("skills/review/references/nested");
+    fs::create_dir_all(&references).unwrap();
+    fs::write(references.join("extra.md"), "Nested reference evidence").unwrap();
+    let catalog = SkillCatalog::load(root.path(), &["review".into()]).unwrap();
+    let policy = ModelSkillConfig {
+        include_references: true,
+        ..config(SkillLoadingMode::Preload)
+    };
+    let prompt = catalog.prompt(&policy).unwrap();
+    let parsed: Value = serde_json::from_str(&prompt).unwrap();
+    assert_eq!(parsed["preloaded"].as_array().unwrap().len(), 3);
+    assert!(prompt.contains("Reference body review"));
+    assert!(prompt.contains("Nested reference evidence"));
+    assert!(!prompt.contains("Reference body report"));
+    assert!(!prompt.contains("exit 99"));
+    assert!(
+        parsed["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| { entry["preloaded"] == (entry["path"] != "scripts/check.sh") })
+    );
+    let tight = ModelSkillConfig {
+        max_preload_bytes: prompt.len() - 1,
+        ..policy.clone()
+    };
+    assert!(catalog.prompt(&tight).is_err());
+    fs::write(references.join("binary.dat"), [0xff]).unwrap();
+    assert!(catalog.prompt(&policy).is_err());
+}
+
+#[test]
+fn references_option_requires_preload_and_preserves_default_serialization() {
+    for mode in [SkillLoadingMode::Catalog, SkillLoadingMode::Selective] {
+        let policy = ModelSkillConfig {
+            include_references: true,
+            ..config(mode)
+        };
+        assert!(policy.validate().is_err());
+    }
+    assert!(
+        serde_json::to_value(ModelSkillConfig::default())
+            .unwrap()
+            .get("include_references")
+            .is_none()
+    );
+    let policy: ModelSkillConfig =
+        serde_json::from_value(json!({"mode":"preload","include_references":true})).unwrap();
+    assert!(policy.validate().is_ok());
+}
 #[test]
 fn selection_cannot_expand_scope_or_escape_and_missing_is_error() {
     let (_root, catalog) = fixture();

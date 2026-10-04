@@ -239,6 +239,9 @@ Configure skill delivery in `app.json` by actual model ID. An exact match wins o
   "skills": ["source-review", "reporting"],
   "model_configurations": {
     "*": { "skills": { "mode": "catalog" } },
+    "my-local-model": {
+      "skills": { "mode": "preload", "include_references": true }
+    },
     "gpt-6.1-sol": {
       "skills": {
         "mode": "selective",
@@ -253,7 +256,7 @@ Configure skill delivery in `app.json` by actual model ID. An exact match wins o
 }
 ```
 
-`catalog` sends names and descriptions only. `preload` adds every declared `SKILL.md`; `selective` adds exactly the specified files. Preload modes include a relative resource inventory, per-file skill/path provenance and an indication of which files are already included. Other text resources remain available through `dustagent__read_skill`; scripts are never executed by loading. Missing, undeclared or invalid selected resources and oversized preload payloads fail before model execution. The 32 KiB default budget (configurable up to 256 KiB) covers the complete serialized skill prompt in preload modes. Catalog mode retains its existing metadata bounds. See [configuration and resume behavior](docs/20_모델별_스킬_로딩.md).
+`catalog` sends names and descriptions only. `preload` adds every declared `SKILL.md`; set `include_references: true` in that skill policy to also preload all `references/` files recursively. The option defaults to false and is valid only in preload mode. `selective` adds exactly the specified files. Preload modes include a relative resource inventory, per-file skill/path provenance and an indication of which files are already included. Other text resources remain available through `dustagent__read_skill`; scripts are never executed by loading. Missing, undeclared or invalid selected resources and oversized preload payloads fail before model execution. The 32 KiB default budget (configurable up to 256 KiB) covers the complete serialized skill prompt in preload modes. Catalog mode retains its existing metadata bounds. See [configuration and resume behavior](docs/20_모델별_스킬_로딩.md).
 
 ## Context compaction and original transcripts
 

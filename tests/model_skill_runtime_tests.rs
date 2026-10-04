@@ -147,6 +147,40 @@ async fn wildcard_selective_submits_only_named_reference_with_provenance() {
     assert!(!text.contains("BODY_review"));
     assert!(!text.contains("REFERENCE_private"));
 }
+
+#[tokio::test]
+async fn reference_preload_submits_content_and_retains_skill_lookup() {
+    let (root, mut manifest) = fixture();
+    let mut config = policy(SkillLoadingMode::Preload);
+    config.skills.include_references = true;
+    manifest.model_configurations.insert("*".into(), config);
+    let (provider, calls) = provider("actual-model");
+    let mut core = DustCore::new(manifest, provider)
+        .with_app_resources(root.path(), None)
+        .unwrap();
+    let tools = core.gather_mcp_tools().await.unwrap();
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool.name == "dustagent__read_skill")
+    );
+    let result = core
+        .execute_tool(
+            "dustagent__read_skill",
+            serde_json::json!({"skill":"review","path":"references/check.md"}),
+        )
+        .await
+        .unwrap();
+    assert!(result.contains("REFERENCE_review"));
+    assert_eq!(
+        core.execute_report("task").await.stop_reason,
+        StopReason::Completed
+    );
+    let text = submitted(&calls);
+    assert!(text.contains("BODY_review"));
+    assert!(text.contains("REFERENCE_review"));
+    assert!(!text.contains("REFERENCE_private"));
+}
 #[test]
 fn provider_wrappers_forward_model_identity() {
     let (p, _) = provider("arc-model");
