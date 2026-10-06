@@ -339,3 +339,102 @@ fn process_kill_releases_lease_and_preserves_safe_boundary() {
     assert_eq!(report["output"], "resumed");
     assert_eq!(report["tool_calls"].as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn completed_cli_checkpoint_accepts_followup_without_replaying_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = manifest(dir.path());
+    let (url, _, _) = serve(vec![(
+        json!({"role":"assistant","content":"old answer"}),
+        Duration::ZERO,
+    )]);
+    let first = command(dir.path(), &app, &url)
+        .args(["--checkpoint", "state.json", "original task"])
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+    let (url, _, captured) = serve(vec![(
+        json!({"role":"assistant","content":"fixed answer"}),
+        Duration::ZERO,
+    )]);
+    let next = command(dir.path(), &app, &url)
+        .args([
+            "--json",
+            "--resume",
+            "state.json",
+            "--max-turns",
+            "1",
+            "Return JSON instead",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        next.status.success(),
+        "{}",
+        String::from_utf8_lossy(&next.stderr)
+    );
+    let report: Value = serde_json::from_slice(&next.stdout).unwrap();
+    assert_eq!(report["output"], "fixed answer");
+    assert_eq!(report["turns_used"], 2);
+    let requests = captured.lock().unwrap();
+    let messages = requests[0]["messages"].as_array().unwrap();
+    assert_eq!(messages[1]["content"], "original task");
+    assert_eq!(messages[2]["content"], "old answer");
+    assert_eq!(messages.last().unwrap()["content"], "Return JSON instead");
+    let saved = dustagent::application::checkpoint::load(dir.path().join("state.json")).unwrap();
+    assert_eq!(saved.user_input, "original task");
+    assert_eq!(
+        saved
+            .messages
+            .iter()
+            .filter(|m| m.content.as_deref() == Some("Return JSON instead"))
+            .count(),
+        1
+    );
+    let rejected = command(dir.path(), &app, "http://127.0.0.1:1/v1")
+        .args(["--resume", "state.json"])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(1));
+}
+
+#[test]
+fn ready_cli_checkpoint_appends_followup_after_observed_tool_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = manifest(dir.path());
+    let (url, _, _) = serve(vec![(tool_message(), Duration::ZERO)]);
+    let first = command(dir.path(), &app, &url)
+        .args([
+            "--checkpoint",
+            "state.json",
+            "--max-turns",
+            "1",
+            "original task",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(first.status.code(), Some(2));
+    let (url, _, captured) = serve(vec![(
+        json!({"role":"assistant","content":"corrected"}),
+        Duration::ZERO,
+    )]);
+    let next = command(dir.path(), &app, &url)
+        .args([
+            "--json",
+            "--resume",
+            "state.json",
+            "--max-turns",
+            "1",
+            "Use JSON",
+        ])
+        .output()
+        .unwrap();
+    assert!(next.status.success());
+    let report: Value = serde_json::from_slice(&next.stdout).unwrap();
+    assert_eq!(report["tool_calls"].as_array().unwrap().len(), 1);
+    let requests = captured.lock().unwrap();
+    let messages = requests[0]["messages"].as_array().unwrap();
+    assert_eq!(messages[messages.len() - 2]["role"], "tool");
+    assert_eq!(messages.last().unwrap()["content"], "Use JSON");
+}

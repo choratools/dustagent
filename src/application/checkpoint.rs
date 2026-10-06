@@ -113,6 +113,12 @@ impl Checkpoint {
         Ok(())
     }
     pub fn ensure_resumable(&self) -> Result<()> {
+        self.ensure_resumable_with_prompt(None)
+    }
+    pub fn ensure_resumable_with_prompt(&self, prompt: Option<&str>) -> Result<()> {
+        if prompt.is_some_and(|text| text.trim().is_empty()) {
+            return Err(invalid("resume followup prompt must not be empty"));
+        }
         self.validate_protocol()?;
         match self.phase {
             CheckpointPhase::Ready => Ok(()),
@@ -122,7 +128,15 @@ impl Checkpoint {
             CheckpointPhase::ValidationInFlight => Err(invalid(
                 "validation was interrupted; replay could repeat side effects",
             )),
-            CheckpointPhase::Finished => Err(invalid("execution already finished")),
+            CheckpointPhase::Finished
+                if prompt.is_some_and(|text| !text.trim().is_empty())
+                    && self.report.is_complete() =>
+            {
+                Ok(())
+            }
+            CheckpointPhase::Finished => Err(invalid(
+                "execution already finished; provide a followup prompt to continue a completed execution",
+            )),
             CheckpointPhase::Blocked => Err(invalid(
                 "execution is blocked and cannot resume automatically",
             )),

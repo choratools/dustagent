@@ -231,7 +231,7 @@ impl<P: LlmProvider> DustCore<P> {
         self.session_tools = session.tool_calls.clone();
         self.working_state = session.state.clone();
         self.session_phase = CheckpointPhase::Ready;
-        let report = self.run_inner(input, Vec::new(), None).await;
+        let report = self.run_inner(input, Vec::new(), None, None).await;
         session.transcript = self.archive.as_ref().map(|store| store.reference());
         session.binding = Some(binding);
         session.messages = std::mem::take(&mut self.session_messages);
@@ -255,6 +255,21 @@ impl<P: LlmProvider> DustCore<P> {
     }
 
     pub async fn resume_report(&mut self, seed: &Checkpoint) -> ExecutionReport {
+        self.resume_report_with_prompt(seed, None).await
+    }
+
+    /// Continue a safe checkpoint with an optional new user instruction.
+    pub async fn resume_report_with_prompt(
+        &mut self,
+        seed: &Checkpoint,
+        prompt: Option<&str>,
+    ) -> ExecutionReport {
+        if prompt.is_some_and(|text| text.trim().is_empty()) {
+            let mut report = seed.report.clone();
+            report.stop_reason = StopReason::ExecutionError;
+            report.error = Some("Resume followup prompt must not be empty".into());
+            return report;
+        }
         if self.checkpoint_path.is_none() {
             let mut report = seed.report.clone();
             report.stop_reason = StopReason::ExecutionError;
@@ -264,14 +279,14 @@ impl<P: LlmProvider> DustCore<P> {
         if let Err(err) = seed
             .validate_for_in(&self.manifest, &self.cwd().unwrap_or_default())
             .and_then(|_| seed.validate_resources(self.resource_hash.as_deref()))
-            .and_then(|_| seed.ensure_resumable())
+            .and_then(|_| seed.ensure_resumable_with_prompt(prompt))
         {
             let mut report = seed.report.clone();
             report.stop_reason = StopReason::ExecutionError;
             report.error = Some(format!("Cannot resume checkpoint: {err}"));
             return report;
         }
-        self.run_inner(&seed.user_input, Vec::new(), Some(seed))
+        self.run_inner(&seed.user_input, Vec::new(), Some(seed), prompt)
             .await
     }
 
@@ -280,18 +295,28 @@ impl<P: LlmProvider> DustCore<P> {
         seed: &Checkpoint,
         store: &ExperienceStore,
     ) -> ExecutionReport {
+        self.resume_report_with_prompt_and_experience(seed, None, store)
+            .await
+    }
+
+    pub async fn resume_report_with_prompt_and_experience(
+        &mut self,
+        seed: &Checkpoint,
+        prompt: Option<&str>,
+        store: &ExperienceStore,
+    ) -> ExecutionReport {
         if self.checkpoint_path.is_none() {
-            return self.resume_report(seed).await;
+            return self.resume_report_with_prompt(seed, prompt).await;
         }
         if seed
             .validate_for_in(&self.manifest, &self.cwd().unwrap_or_default())
             .and_then(|_| seed.validate_resources(self.resource_hash.as_deref()))
-            .and_then(|_| seed.ensure_resumable())
+            .and_then(|_| seed.ensure_resumable_with_prompt(prompt))
             .is_err()
         {
-            return self.resume_report(seed).await;
+            return self.resume_report_with_prompt(seed, prompt).await;
         }
-        let mut report = self.resume_report(seed).await;
+        let mut report = self.resume_report_with_prompt(seed, prompt).await;
         let eligible = report.is_complete()
             && report
                 .tool_calls
@@ -784,7 +809,7 @@ impl<P: LlmProvider> DustCore<P> {
         user_input: &str,
         history: Vec<ChatMessage>,
     ) -> ExecutionReport {
-        self.run_inner(user_input, history, None).await
+        self.run_inner(user_input, history, None, None).await
     }
 
     async fn run_inner(
@@ -792,6 +817,7 @@ impl<P: LlmProvider> DustCore<P> {
         user_input: &str,
         history: Vec<ChatMessage>,
         seed: Option<&Checkpoint>,
+        followup: Option<&str>,
     ) -> ExecutionReport {
         let started = Instant::now();
         let mut report = seed.map(|cp| cp.report.clone()).unwrap_or_default();
@@ -818,6 +844,10 @@ impl<P: LlmProvider> DustCore<P> {
         let prior_ms = report.elapsed_ms;
         let prior_turns = report.turns_used;
         report.error = None;
+        if followup.is_some() {
+            report.output = None;
+            report.validation = None;
+        }
         if seed.is_some() {
             report.warnings.push("Resumed transcript and evidence; external MCP sessions are restarted, not restored".into());
         }
@@ -889,16 +919,30 @@ impl<P: LlmProvider> DustCore<P> {
         messages.push(ChatMessage::user(user_input));
         if let Some(seed) = seed {
             messages = seed.messages.clone();
+            if let Some(prompt) = followup {
+                messages.push(ChatMessage::user(prompt));
+            }
         } else if self.session_mode && !self.session_messages.is_empty() {
             messages = self.session_messages.clone();
             messages.push(ChatMessage::user(user_input));
         }
+        let current_request = messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .and_then(|message| message.content.clone())
+            .unwrap_or_else(|| user_input.to_owned());
         let init_archive: Result<()> = (|| {
             let binding = self.archive_binding()?;
             if let Some(reference) = seed.and_then(|cp| cp.transcript.as_ref()) {
                 self.archive = Some(super::transcript::TranscriptStore::open(
                     reference, &binding,
                 )?);
+                if followup.is_some() {
+                    self.archive =
+                        Some(self.archive.as_ref().expect("opened seed archive").fork()?);
+                    self.archive_message(messages.last().expect("followup user message"))?;
+                }
             } else if !self.session_mode || self.archive.is_none() {
                 if seed.is_some() {
                     report.warnings.push("Legacy checkpoint has no full original archive; only its retained messages can be preserved".into());
@@ -973,7 +1017,7 @@ impl<P: LlmProvider> DustCore<P> {
                 && (compact_work.is_some()
                     || before >= compact_config.trigger_tokens
                     || !super::session::within_bounds(&messages))
-                && super::compaction::plan(&messages, 0, user_input).is_some()
+                && super::compaction::plan(&messages, 0, &current_request).is_some()
             {
                 report.turns_used = turn;
                 compact_attempt += 1;
@@ -1005,7 +1049,7 @@ impl<P: LlmProvider> DustCore<P> {
                         &messages,
                         &compact_config,
                         tools_bytes,
-                        user_input,
+                        &current_request,
                     )
                     .map(super::compaction::SummaryWork::new);
                 }
@@ -1019,7 +1063,7 @@ impl<P: LlmProvider> DustCore<P> {
                 };
                 let Some((summary_request, chunk_end)) = work.request(
                     &compact_config,
-                    user_input,
+                    &current_request,
                     compact_attempt,
                     &compact_retry_feedback,
                 ) else {

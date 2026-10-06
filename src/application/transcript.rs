@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -185,6 +185,28 @@ impl TranscriptStore {
             bytes,
             entries,
         })
+    }
+    /// Copy immutable checkpoint history before adding a continuation request.
+    /// A failed checkpoint save must not invalidate the previous archive reference.
+    pub fn fork(&self) -> Result<Self> {
+        let root = self
+            .reference
+            .path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(invalid)?;
+        Self::open_in(&self.reference, &self.reference.binding, root)?;
+        let mut fork = Self::create_in(root, &self.reference.binding)?;
+        let source = File::open(&self.reference.path)?;
+        let mut target = OpenOptions::new().write(true).open(&fork.reference.path)?;
+        let bytes = std::io::copy(&mut source.take(MAX_ARCHIVE + 1), &mut target)?;
+        if bytes > MAX_ARCHIVE || bytes != self.bytes {
+            return Err(invalid());
+        }
+        target.sync_all()?;
+        fork.reference.count = self.reference.count;
+        fork.reference.hash = self.reference.hash.clone();
+        Self::open_in(&fork.reference, &self.reference.binding, root)
     }
     pub fn count(&self) -> u64 {
         self.reference.count

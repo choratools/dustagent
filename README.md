@@ -137,11 +137,11 @@ git diff --cached | dust run commit_gen
 | `--json` | Emit a structured report, including incomplete results |
 | `--report PATH` | Save the termination report to a file |
 | `--checkpoint PATH` | Override the automatic temporary checkpoint destination; requires a new file |
-| `--resume PATH` | Resume a safe checkpoint using its original input and conversation |
+| `--resume PATH` | Resume saved conversation; optional input appends a follow-up user prompt |
 | `--experience` | Record runs and review/reuse useful past examples |
 | `--experience-dir PATH` | Override the experience directory; implies `--experience` |
 
-Place options before input text. Without input arguments, `run` reads STDIN. `--resume` accepts no new input and cannot be combined with `--checkpoint`. Inspect the exit code even when using `--json`.
+Place options before input text. Without input arguments, `run` reads STDIN. `--resume` accepts optional positional follow-up text and cannot be combined with `--checkpoint`. Without follow-up text it continues the saved task; it does not read STDIN. Inspect the exit code even when using `--json`.
 
 ### ACP
 
@@ -313,16 +313,16 @@ dust run crawler --max-turns 1 --report run-report.json "https://example.com"
 dust run crawler --resume /tmp/dust-run-XXXXXX/state.json --max-turns 10 --json
 ```
 
-The temporary path above is illustrative; use the actual reported path. Completed or unsafe interrupted runs remain non-resumable.
+The temporary path above is illustrative; use the actual reported path. A completed checkpoint requires a nonempty follow-up prompt. Unsafe interrupted runs remain non-resumable.
 
 ```bash
 dust run crawler --checkpoint state/crawl.json --max-turns 10 "https://example.com"
 dust run crawler --resume state/crawl.json --max-turns 10 --json
 ```
 
-Resume uses the original input and requires the same manifest and working directory. Each resumed invocation grants an additional turn/time budget. Confirmed tool results remain in the conversation; they are not automatically replayed. MCP processes restart, so browser sessions and remote state are not restored. The model can still request new operations.
+Resume preserves the original input and requires the same manifest and working directory. To correct a completed response, append a follow-up prompt: `dust run crawler --resume /tmp/dust-run-XXXXXX/state.json --max-turns 5 "Return the previous result in the required JSON format."`. The text becomes a new user message after the saved conversation; checker/experience input remains the original task. Whitespace-only follow-ups are rejected. Each resumed invocation grants an additional turn/time budget. Confirmed tool results remain in the conversation; they are not automatically replayed. MCP processes restart, so browser sessions and remote state are not restored. The model can still request new operations.
 
-Checkpoints are atomically saved with filesystem synchronization, owner-only Unix permissions, and a 32 MiB size limit. The CLI holds an exclusive sidecar lock released automatically when its process exits. A safe boundary after a tool batch or before a model request can resume; an interrupted tool call, unknown transport outcome, or interrupted output checker cannot. Completed runs also cannot resume. There is no force-resume option or automatic continuation. Keep `--report` and checkpoint paths distinct. See [checkpoint behavior](docs/13_체크포인트_및_재개.md) for details. Building from source requires Rust 1.89 or newer.
+Checkpoints are atomically saved with filesystem synchronization, owner-only Unix permissions, and a 32 MiB size limit. The CLI holds an exclusive sidecar lock released automatically when its process exits. A safe boundary after a tool batch or before a model request can resume; an interrupted tool call, unknown transport outcome, or interrupted output checker cannot. Completed checkpoints may continue only with a nonempty follow-up prompt. There is no force-resume option or automatic continuation. Keep `--report` and checkpoint paths distinct. See [checkpoint behavior](docs/13_체크포인트_및_재개.md) for details. Building from source requires Rust 1.89 or newer.
 
 ## Completion feedback, recovery, and working state
 

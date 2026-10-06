@@ -137,7 +137,7 @@ struct RunArgs {
     #[arg(long, conflicts_with = "resume")]
     checkpoint: Option<PathBuf>,
 
-    /// Continue a safe checkpoint using its original input and conversation
+    /// Continue a safe checkpoint; optional INPUT appends a followup user prompt
     #[arg(long, conflicts_with = "checkpoint")]
     resume: Option<PathBuf>,
 
@@ -428,16 +428,12 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
             }
         }
     }
+    let resume_prompt = (!args.input.is_empty()).then(|| args.input.join(" "));
     let resumed = if args.resume.is_some() {
-        if !args.input.is_empty() {
-            anyhow::bail!(
-                "--resume uses the checkpoint's original input; do not provide new input"
-            );
-        }
         let checkpoint =
             dustagent::application::checkpoint::load(checkpoint_path.as_ref().unwrap())?;
         checkpoint.validate_for(&manifest)?;
-        checkpoint.ensure_resumable()?;
+        checkpoint.ensure_resumable_with_prompt(resume_prompt.as_deref())?;
         Some(checkpoint)
     } else {
         None
@@ -537,9 +533,15 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
         core.set_timeouts(remaining, tool_timeout_ms);
         if let Some(checkpoint) = &resumed {
             if let Some(store) = &store {
-                core.resume_report_with_experience(checkpoint, store).await
+                core.resume_report_with_prompt_and_experience(
+                    checkpoint,
+                    resume_prompt.as_deref(),
+                    store,
+                )
+                .await
             } else {
-                core.resume_report(checkpoint).await
+                core.resume_report_with_prompt(checkpoint, resume_prompt.as_deref())
+                    .await
             }
         } else if let Some(store) = &store {
             core.execute_report_with_experience(&user_input, store)
