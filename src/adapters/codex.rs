@@ -4,7 +4,9 @@
 //! No backend response body or authentication value is included in errors.
 use super::codex_auth::{CodexAuth, Credentials};
 use crate::error::ProviderFailure;
-use crate::ports::llm::{ChatMessage, LlmProvider, LlmResponse, ToolCall, ToolDefinition};
+use crate::ports::llm::{
+    ChatMessage, LlmCompletion, LlmProvider, LlmResponse, LlmUsage, ToolCall, ToolDefinition,
+};
 use crate::{DustError, Result};
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -148,6 +150,16 @@ impl LlmProvider for CodexProvider {
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse> {
+        self.chat_with_usage(messages, tools)
+            .await
+            .map(|completion| completion.response)
+    }
+
+    async fn chat_with_usage(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+    ) -> Result<LlmCompletion> {
         let payload = request(&self.model, messages, tools)?;
         let credentials = self.auth.credentials().await?;
         let mut response = self.send(&credentials, &payload).await?;
@@ -177,7 +189,10 @@ impl LlmProvider for CodexProvider {
             )
         })? {
             if let Some(result) = parser.push(&chunk)? {
-                return Ok(result);
+                return Ok(LlmCompletion {
+                    response: result,
+                    usage: parser.usage.clone(),
+                });
             }
         }
         Err(failure(
@@ -193,6 +208,7 @@ struct SseParser {
     frame: Vec<u8>,
     line: Vec<u8>,
     items: Vec<Value>,
+    usage: Option<LlmUsage>,
 }
 impl SseParser {
     fn push(&mut self, bytes: &[u8]) -> Result<Option<LlmResponse>> {
@@ -298,6 +314,7 @@ impl SseParser {
                         "Codex response did not complete",
                     ));
                 }
+                self.usage = parse_usage(response.get("usage"));
                 let items = if let Some(output) = response.get("output") {
                     let output = output.as_array().ok_or_else(|| {
                         failure(
@@ -412,6 +429,27 @@ fn parse_output(items: &[Value]) -> Result<LlmResponse> {
         },
         tool_calls: if calls.is_empty() { None } else { Some(calls) },
     })
+}
+
+fn parse_usage(value: Option<&Value>) -> Option<LlmUsage> {
+    let value = value?.as_object()?;
+    let count = |key: &str| value.get(key).and_then(Value::as_u64);
+    let cached_input_tokens = value
+        .get("input_tokens_details")
+        .and_then(|v| v.get("cached_tokens"))
+        .and_then(Value::as_u64);
+    let reasoning_tokens = value
+        .get("output_tokens_details")
+        .and_then(|v| v.get("reasoning_tokens"))
+        .and_then(Value::as_u64);
+    let usage = LlmUsage {
+        input_tokens: count("input_tokens"),
+        output_tokens: count("output_tokens"),
+        total_tokens: count("total_tokens"),
+        cached_input_tokens,
+        reasoning_tokens,
+    };
+    (!usage.is_empty()).then_some(usage)
 }
 
 #[cfg(test)]

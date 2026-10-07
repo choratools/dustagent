@@ -137,6 +137,39 @@ pub struct LlmResponse {
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
+/// Token counts reported by the provider for one completed response.
+/// Providers may omit individual counters or the entire usage object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct LlmUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+}
+
+impl LlmUsage {
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.total_tokens.is_none()
+            && self.cached_input_tokens.is_none()
+            && self.reasoning_tokens.is_none()
+    }
+}
+
+/// A model response together with optional provider-reported token usage.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LlmCompletion {
+    pub response: LlmResponse,
+    pub usage: Option<LlmUsage>,
+}
+
 impl LlmResponse {
     /// Creates an LLM response containing text content only.
     pub fn text(content: impl Into<String>) -> Self {
@@ -184,6 +217,21 @@ pub trait LlmProvider: Send + Sync {
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
     ) -> crate::Result<LlmResponse>;
+
+    /// Sends a conversation and returns provider usage when available.
+    /// Existing providers remain compatible and default to no usage metadata.
+    async fn chat_with_usage(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+    ) -> crate::Result<LlmCompletion> {
+        self.chat(messages, tools)
+            .await
+            .map(|response| LlmCompletion {
+                response,
+                usage: None,
+            })
+    }
 }
 
 #[async_trait]
@@ -201,6 +249,13 @@ impl<P: LlmProvider + ?Sized> LlmProvider for Box<P> {
     ) -> crate::Result<LlmResponse> {
         (**self).chat(messages, tools).await
     }
+    async fn chat_with_usage(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+    ) -> crate::Result<LlmCompletion> {
+        (**self).chat_with_usage(messages, tools).await
+    }
 }
 
 #[async_trait]
@@ -217,6 +272,13 @@ impl<P: LlmProvider + ?Sized> LlmProvider for std::sync::Arc<P> {
         tools: Option<&[ToolDefinition]>,
     ) -> crate::Result<LlmResponse> {
         (**self).chat(messages, tools).await
+    }
+    async fn chat_with_usage(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+    ) -> crate::Result<LlmCompletion> {
+        (**self).chat_with_usage(messages, tools).await
     }
 }
 

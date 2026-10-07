@@ -1,6 +1,8 @@
 //! CLI provider selection. Explicit API configuration never falls back to account auth.
 use super::{codex::CodexProvider, codex_auth::CodexAuth, openai::OpenAiProvider};
-use crate::{ChatMessage, DustError, LlmProvider, LlmResponse, Result, ToolDefinition};
+use crate::{
+    ChatMessage, DustError, LlmCompletion, LlmProvider, LlmResponse, Result, ToolDefinition,
+};
 use async_trait::async_trait;
 
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-6.1-sol";
@@ -79,6 +81,17 @@ impl LlmProvider for AutoProvider {
         match self {
             Self::OpenAi(provider) => provider.chat(messages, tools).await,
             Self::Codex(provider) => provider.chat(messages, tools).await,
+        }
+    }
+
+    async fn chat_with_usage(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+    ) -> Result<LlmCompletion> {
+        match self {
+            Self::OpenAi(provider) => provider.chat_with_usage(messages, tools).await,
+            Self::Codex(provider) => provider.chat_with_usage(messages, tools).await,
         }
     }
 }

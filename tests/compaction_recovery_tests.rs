@@ -274,7 +274,7 @@ async fn later_failed_compaction_preserves_previous_directory_and_success_record
 }
 
 #[tokio::test]
-async fn utf8_summary_over_auto_9831_byte_cap_recovers_and_report_survives_archive_cleanup() {
+async fn utf8_summary_over_auto_token_cap_recovers_and_report_survives_archive_cleanup() {
     let oversized = "가".repeat(3278);
     assert_eq!(oversized.len(), 9834);
     let calls = Arc::new(Mutex::new(Calls::default()));
@@ -298,7 +298,9 @@ async fn utf8_summary_over_auto_9831_byte_cap_recovers_and_report_survives_archi
     assert_eq!(report.stop_reason, StopReason::Completed);
     assert_eq!(statuses(&report), ["oversized", "accepted"]);
     assert_eq!(report.compaction_attempts[0].summary_bytes, Some(9834));
-    assert_eq!(report.compaction_attempts[0].max_summary_bytes, 9831);
+    assert_eq!(report.compaction_attempts[0].summary_tokens, Some(3278));
+    assert_eq!(report.compaction_attempts[0].max_summary_tokens, 3277);
+    assert_eq!(report.compaction_attempts[0].max_summary_bytes, 26_216);
     assert_eq!(calls.lock().unwrap().summary, 2);
     assert_eq!(calls.lock().unwrap().task, 3);
     let reference = report.transcript.as_ref().unwrap();

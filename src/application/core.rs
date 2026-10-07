@@ -1030,6 +1030,10 @@ impl<P: LlmProvider> DustCore<P> {
                         attempt: compact_attempt,
                         status: super::execution::CompactionStatus::InputTooLarge,
                         summary_bytes: None,
+                        summary_tokens: None,
+                        summary_token_source: None,
+                        provider_usage: None,
+                        max_summary_tokens: compact_config.max_summary_tokens,
                         max_summary_bytes: compact_config.max_summary_bytes,
                         tool_call_count: 0,
                         archive_index: None,
@@ -1071,14 +1075,14 @@ impl<P: LlmProvider> DustCore<P> {
                     note_compact!(InputTooLarge);
                     stop!(report, &messages);
                 };
-                let response = match wait_until(
+                let completion = match wait_until(
                     deadline,
                     self.cancellation.clone(),
-                    self.provider.chat(&summary_request, None),
+                    self.provider.chat_with_usage(&summary_request, None),
                 )
                 .await
                 {
-                    Ok(Ok(response)) => response,
+                    Ok(Ok(completion)) => completion,
                     Ok(Err(error)) => {
                         report.error = Some(format!("Compaction failed: {error}"));
                         note_compact!(ProviderError);
@@ -1095,9 +1099,28 @@ impl<P: LlmProvider> DustCore<P> {
                         stop!(report, &messages);
                     }
                 };
+                let response = completion.response;
+                let provider_usage = completion.usage;
                 let summary = response.content.as_deref().unwrap_or("");
                 let tool_call_count = response.tool_calls.as_ref().map_or(0, Vec::len);
+                let reported_output_tokens = provider_usage.as_ref().and_then(|usage| {
+                    usage.output_tokens.map(|output| {
+                        output.saturating_sub(usage.reasoning_tokens.unwrap_or_default())
+                    })
+                });
+                let summary_tokens = reported_output_tokens.map_or_else(
+                    || super::compaction::estimate_summary_tokens(summary),
+                    |count| usize::try_from(count).unwrap_or(usize::MAX),
+                );
                 report.compaction_attempts[attempt_index].summary_bytes = Some(summary.len());
+                report.compaction_attempts[attempt_index].summary_tokens = Some(summary_tokens);
+                report.compaction_attempts[attempt_index].summary_token_source =
+                    Some(if reported_output_tokens.is_some() {
+                        super::execution::SummaryTokenSource::ProviderReported
+                    } else {
+                        super::execution::SummaryTokenSource::Estimated
+                    });
+                report.compaction_attempts[attempt_index].provider_usage = provider_usage.clone();
                 report.compaction_attempts[attempt_index].tool_call_count = tool_call_count;
                 let original_summary = ChatMessage::system(format!(
                     "[dustagent compaction response: unverified model output]\n{}",
@@ -1128,11 +1151,19 @@ impl<P: LlmProvider> DustCore<P> {
                             summary.len()
                         ),
                     ))
+                } else if summary_tokens > compact_config.max_summary_tokens {
+                    Some((
+                        super::execution::CompactionStatus::Oversized,
+                        format!(
+                            "Compaction returned an oversized summary ({} tokens > {} tokens); original context retained",
+                            summary_tokens, compact_config.max_summary_tokens
+                        ),
+                    ))
                 } else if summary.len() > compact_config.max_summary_bytes {
                     Some((
                         super::execution::CompactionStatus::Oversized,
                         format!(
-                            "Compaction returned an oversized summary ({} bytes > {} bytes); original context retained",
+                            "Compaction response exceeded the UTF-8 safety cap ({} bytes > {} bytes); original context retained",
                             summary.len(),
                             compact_config.max_summary_bytes
                         ),
@@ -1275,6 +1306,7 @@ impl<P: LlmProvider> DustCore<P> {
                             .context_window_tokens
                             .unwrap_or(32_768),
                         trigger_tokens: compact_config.trigger_tokens,
+                        max_summary_tokens: compact_config.max_summary_tokens,
                         max_summary_bytes: compact_config.max_summary_bytes,
                     });
                 messages = replacement;
@@ -1309,20 +1341,21 @@ impl<P: LlmProvider> DustCore<P> {
                 tool_call_count: 0,
                 error: None,
                 truncated: false,
+                provider_usage: None,
             };
             let mut retry_index = 0;
-            let resp = loop {
+            let completion = loop {
                 match wait_until(
                     deadline,
                     self.cancellation.clone(),
-                    self.provider.chat(
+                    self.provider.chat_with_usage(
                         &messages,
                         if tools.is_empty() { None } else { Some(&tools) },
                     ),
                 )
                 .await
                 {
-                    Ok(Ok(resp)) => break resp,
+                    Ok(Ok(completion)) => break completion,
                     Ok(Err(err))
                         if err.is_retryable_provider_failure()
                             && retry_index < retry_config.max_retries =>
@@ -1380,6 +1413,8 @@ impl<P: LlmProvider> DustCore<P> {
                     }
                 }
             };
+            turn_record.provider_usage = completion.usage;
+            let resp = completion.response;
             if let Err(error) = self.archive_message(&ChatMessage::assistant(
                 resp.content.clone(),
                 resp.tool_calls.clone(),

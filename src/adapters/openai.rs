@@ -1,5 +1,7 @@
 use crate::error::ProviderFailure;
-use crate::ports::llm::{ChatMessage, LlmProvider, LlmResponse, ToolCall, ToolDefinition};
+use crate::ports::llm::{
+    ChatMessage, LlmCompletion, LlmProvider, LlmResponse, LlmUsage, ToolCall, ToolDefinition,
+};
 use crate::{DustError, Result};
 use async_trait::async_trait;
 use serde::Serialize;
@@ -118,6 +120,16 @@ impl LlmProvider for OpenAiProvider {
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
     ) -> Result<LlmResponse> {
+        self.chat_with_usage(messages, tools)
+            .await
+            .map(|completion| completion.response)
+    }
+
+    async fn chat_with_usage(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+    ) -> Result<LlmCompletion> {
         let url = format!("{}/chat/completions", self.base_url);
 
         // Serialize conversation messages into OpenAI wire format
@@ -252,11 +264,36 @@ impl LlmProvider for OpenAiProvider {
                 None
             };
 
-        Ok(LlmResponse {
-            content,
-            tool_calls,
+        let usage = parse_usage(resp_json.get("usage"));
+        Ok(LlmCompletion {
+            response: LlmResponse {
+                content,
+                tool_calls,
+            },
+            usage,
         })
     }
+}
+
+fn parse_usage(value: Option<&Value>) -> Option<LlmUsage> {
+    let value = value?.as_object()?;
+    let count = |key: &str| value.get(key).and_then(Value::as_u64);
+    let cached_input_tokens = value
+        .get("prompt_tokens_details")
+        .and_then(|v| v.get("cached_tokens"))
+        .and_then(Value::as_u64);
+    let reasoning_tokens = value
+        .get("completion_tokens_details")
+        .and_then(|v| v.get("reasoning_tokens"))
+        .and_then(Value::as_u64);
+    let usage = LlmUsage {
+        input_tokens: count("prompt_tokens"),
+        output_tokens: count("completion_tokens"),
+        total_tokens: count("total_tokens"),
+        cached_input_tokens,
+        reasoning_tokens,
+    };
+    (!usage.is_empty()).then_some(usage)
 }
 
 #[cfg(test)]

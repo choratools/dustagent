@@ -17,7 +17,9 @@ pub use domain::manifest::{
 };
 pub use domain::patch::{LineRange, PatchError, SearchReplaceBlock, extract_blocks};
 pub use error::{DustError, ProviderFailure, Result};
-pub use ports::llm::{ChatMessage, LlmProvider, LlmResponse, ToolCall, ToolDefinition};
+pub use ports::llm::{
+    ChatMessage, LlmCompletion, LlmProvider, LlmResponse, LlmUsage, ToolCall, ToolDefinition,
+};
 pub use ports::mcp::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpClient, McpTool};
 pub use ports::patcher::CodePatcher;
 

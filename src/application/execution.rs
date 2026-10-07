@@ -1,3 +1,4 @@
+use crate::ports::llm::LlmUsage;
 use crate::{DustError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,6 +46,8 @@ pub struct TurnRecord {
     pub tool_call_count: usize,
     pub error: Option<String>,
     pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_usage: Option<LlmUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +118,13 @@ pub enum CompactionStatus {
     ArchiveError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryTokenSource {
+    ProviderReported,
+    Estimated,
+}
+
 /// Diagnostics survive temporary archive deletion without copying conversation content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionAttempt {
@@ -122,6 +132,14 @@ pub struct CompactionAttempt {
     pub attempt: usize,
     pub status: CompactionStatus,
     pub summary_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_token_source: Option<SummaryTokenSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_usage: Option<LlmUsage>,
+    #[serde(default)]
+    pub max_summary_tokens: usize,
     pub max_summary_bytes: usize,
     pub tool_call_count: usize,
     pub archive_index: Option<u64>,
