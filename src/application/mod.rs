@@ -12,7 +12,9 @@ pub mod validation;
 pub mod research;
 
 pub mod execution;
-pub use execution::{ExecutionReport, StopReason, ToolRecord, ToolStatus, TurnRecord};
+pub use execution::{
+    ExecutionReport, StopReason, TokenUsageSummary, ToolRecord, ToolStatus, TurnRecord,
+};
 
 pub mod checkpoint;
 

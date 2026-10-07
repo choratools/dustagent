@@ -23,7 +23,9 @@ pub use ports::llm::{
 pub use ports::mcp::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpClient, McpTool};
 pub use ports::patcher::CodePatcher;
 
-pub use application::execution::{ExecutionReport, StopReason, ToolRecord, ToolStatus, TurnRecord};
+pub use application::execution::{
+    ExecutionReport, StopReason, TokenUsageSummary, ToolRecord, ToolStatus, TurnRecord,
+};
 
 pub use application::checkpoint::{Checkpoint, CheckpointPhase};
 

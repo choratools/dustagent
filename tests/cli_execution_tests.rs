@@ -30,7 +30,17 @@ fn endpoint(message: Value, delay: Duration) -> String {
         let mut body = vec![0; length];
         stream.read_exact(&mut body).unwrap();
         std::thread::sleep(delay);
-        let response = json!({"choices":[{"message":message}]}).to_string();
+        let response = json!({
+            "choices": [{"message": message}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "total_tokens": 12,
+                "prompt_tokens_details": {"cached_tokens": 4},
+                "completion_tokens_details": {"reasoning_tokens": 1}
+            }
+        })
+        .to_string();
         let _ = write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -73,6 +83,12 @@ fn incomplete_json_report_and_atomic_file_preserve_evidence() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["stop_reason"], "turn_limit");
     assert_eq!(report["output"], "Partial");
+    assert_eq!(report["token_usage"]["input_tokens"], 10);
+    assert_eq!(report["token_usage"]["cached_input_tokens"], 4);
+    assert_eq!(report["token_usage"]["uncached_input_tokens"], 6);
+    assert_eq!(report["token_usage"]["output_tokens"], 2);
+    assert_eq!(report["token_usage"]["reasoning_tokens"], 1);
+    assert_eq!(report["token_usage"]["total_tokens"], 12);
     assert_eq!(report["tool_calls"][0]["status"], "succeeded");
     assert!(report["tool_calls"][0]["output"].is_string());
     let saved: Value =

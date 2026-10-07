@@ -557,6 +557,7 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
     }
     report.warnings.extend(warnings);
     report.checkpoint_path = checkpoint_path.clone();
+    report.refresh_token_usage();
     let prior_elapsed = resumed
         .as_ref()
         .map_or(0, |checkpoint| checkpoint.report.elapsed_ms);

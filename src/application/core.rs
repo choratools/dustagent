@@ -266,12 +266,14 @@ impl<P: LlmProvider> DustCore<P> {
     ) -> ExecutionReport {
         if prompt.is_some_and(|text| text.trim().is_empty()) {
             let mut report = seed.report.clone();
+            report.refresh_token_usage();
             report.stop_reason = StopReason::ExecutionError;
             report.error = Some("Resume followup prompt must not be empty".into());
             return report;
         }
         if self.checkpoint_path.is_none() {
             let mut report = seed.report.clone();
+            report.refresh_token_usage();
             report.stop_reason = StopReason::ExecutionError;
             report.error = Some("Resume requires a persistent checkpoint destination".into());
             return report;
@@ -282,6 +284,7 @@ impl<P: LlmProvider> DustCore<P> {
             .and_then(|_| seed.ensure_resumable_with_prompt(prompt))
         {
             let mut report = seed.report.clone();
+            report.refresh_token_usage();
             report.stop_reason = StopReason::ExecutionError;
             report.error = Some(format!("Cannot resume checkpoint: {err}"));
             return report;
@@ -353,6 +356,7 @@ impl<P: LlmProvider> DustCore<P> {
         started: Instant,
         prior_ms: u64,
     ) -> bool {
+        report.refresh_token_usage();
         report.checkpoint_path = self.checkpoint_path.clone();
         if self.session_mode {
             self.session_messages = messages.to_vec();
@@ -821,6 +825,7 @@ impl<P: LlmProvider> DustCore<P> {
     ) -> ExecutionReport {
         let started = Instant::now();
         let mut report = seed.map(|cp| cp.report.clone()).unwrap_or_default();
+        report.refresh_token_usage();
         if self.session_mode {
             report.tool_calls = self.session_tools.clone();
         } else {
@@ -1823,6 +1828,7 @@ fn finish_with_prior(
     started: Instant,
     prior_ms: u64,
 ) -> ExecutionReport {
+    report.refresh_token_usage();
     report.elapsed_ms =
         prior_ms.saturating_add(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
     report

@@ -297,6 +297,25 @@ Reports distinguish final responses from tool observations. They contain `stop_r
 
 Without `--json`, only completed runs emit task output on STDOUT. With `--json`, failed runs also emit their report; callers must still inspect the exit code. `--report` saves the report atomically with owner-only permissions on Unix. Reports can include sensitive task and tool data.
 
+When a provider reports usage, JSON output and `--report` include a top-level `token_usage` aggregate across ordinary model turns and compaction responses. It reports input, cached input, uncached input where both counters were returned, output, reasoning, and total tokens; cached input is part of input, and reasoning is part of output. The provider's per-response counters remain under `turns[].provider_usage` and `compaction_attempts[].provider_usage`. Missing provider counters stay unknown, so aggregate values can be partial; Dust does not estimate general request usage. Save and inspect the aggregate with `dust run crawler --report run-report.json "..."` followed by `jq '.token_usage' run-report.json`.
+
+Example:
+
+```json
+{
+  "token_usage": {
+    "responses_with_usage": 3,
+    "input_tokens": 8120,
+    "cached_input_tokens": 6144,
+    "uncached_input_tokens": 1976,
+    "responses_with_uncached_input": 3,
+    "output_tokens": 870,
+    "reasoning_tokens": 320,
+    "total_tokens": 8990
+  }
+}
+```
+
 Defaults are ten model turns, five minutes overall, and thirty seconds per tool call. App fields `max_turns`, `timeout_ms`, and `tool_timeout_ms` set defaults; CLI options override them. Timeout values support 1–86400000 milliseconds. The CLI's overall deadline includes MCP startup, automatic experience review, tool discovery, model requests, and tool calls. Bounded cancellation cleanup can add up to one second and shutdown has a separate five-second budget. Synchronous input/report file I/O is outside the async deadline.
 
 Timed-out MCP clients are discarded to avoid consuming a late response as a later request's result. A timed-out remote operation can still have executed; the runtime does not automatically replay it. Recovered tool failures remain visible in the report and prevent admission as successful experience examples. Output-check failures also prevent admission.
