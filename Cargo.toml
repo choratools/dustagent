@@ -40,6 +40,10 @@ tempfile = "3.10"
 tar = "0.4"
 flate2 = "1.0"
 serde_yaml = "0.9"
+aes-gcm = "0.10.3"
+argon2 = "0.5.3"
+rpassword = "7.5.4"
+zeroize = "1.8"
 
 [profile.release]
 opt-level = 3

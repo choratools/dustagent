@@ -249,15 +249,34 @@ async fn read_frame<R: AsyncRead + Unpin>(
     }
 }
 pub async fn serve_stdio(options: AcpOptions) -> Result<()> {
-    serve(tokio::io::stdin(), tokio::io::stdout(), options).await
+    let app = package::load(&options.app, &std::env::current_dir()?)?;
+    serve_stdio_with_app(options, app).await
+}
+/// Serve an already loaded app, allowing the CLI to unlock encrypted packages first.
+pub async fn serve_stdio_with_app(options: AcpOptions, app: LoadedApp) -> Result<()> {
+    serve_with_app(tokio::io::stdin(), tokio::io::stdout(), options, app).await
 }
 /// Newline-delimited JSON-RPC transport; the reader remains active during prompts.
-pub async fn serve<R, W>(reader: R, mut writer: W, options: AcpOptions) -> Result<()>
+pub async fn serve<R, W>(reader: R, writer: W, options: AcpOptions) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let app = Arc::new(package::load(&options.app, &std::env::current_dir()?)?);
+    let app = package::load(&options.app, &std::env::current_dir()?)?;
+    serve_with_app(reader, writer, options, app).await
+}
+
+async fn serve_with_app<R, W>(
+    reader: R,
+    mut writer: W,
+    options: AcpOptions,
+    app: LoadedApp,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    let app = Arc::new(app);
     let total = options
         .timeout_ms
         .or(app.manifest.timeout_ms)

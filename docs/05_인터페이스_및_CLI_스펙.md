@@ -4,7 +4,7 @@ title: 05. 인터페이스 및 CLI 스펙
 type: spec
 tags: [dustagent, cli, spec, pipe, headless, stdin-stdout]
 created: 2026-10-01
-updated: 2026-10-02
+updated: 2026-10-08
 status: active
 aliases: [CLI 스펙, 인터페이스 명세]
 ---
@@ -17,12 +17,12 @@ aliases: [CLI 스펙, 인터페이스 명세]
 
 | 명령 | 입력 | 산출 |
 | --- | --- | --- |
-| dust run APP [OPTIONS] [INPUT...] | 앱 이름, JSON 경로, 패키지 디렉터리 또는 .dustpkg | 완료한 최종 응답 또는 --json 실행 보고서 |
-| dust acp APP [OPTIONS] | 앱 이름·매니페스트·디렉터리·.dustpkg | ACP v1 stdio JSON-RPC 세션 |
+| dust run APP [OPTIONS] [INPUT...] | 앱 이름, JSON 경로, 패키지 디렉터리 또는 .dustpkg | 완료한 최종 응답 또는 --json 실행 보고서; `--passphrase`로 암호화 패키지 해제 |
+| dust acp APP [OPTIONS] | 앱 이름·매니페스트·디렉터리·.dustpkg | ACP v1 stdio JSON-RPC 세션; `--passphrase` 지원 |
 | dust new NAME DESCRIPTION | 자연어 작업 설명 | apps/NAME/app.json 및 빈 skills/; --stdout이면 JSON만 출력 |
-| dust pack SOURCE [-o OUTPUT] | app.json이 있는 패키지 디렉터리 | .dustpkg 생성 후 경로 출력 |
+| dust pack SOURCE [-o OUTPUT] [--encrypt] [--passphrase VALUE] | app.json이 있는 패키지 디렉터리 | .dustpkg 생성 후 경로 출력; `--encrypt`는 전체 아카이브를 암호화 |
 | dust install SOURCE [--store STORE] | 로컬 디렉터리 또는 .dustpkg | 설치 후 디렉터리 경로 출력 |
-| dust learn APP [--list] | 앱별 경험 기록 | 자동 조사·검토; --list이면 기록 조회 |
+| dust learn APP [--list] [--passphrase VALUE] | 앱별 경험 기록 | 자동 조사·검토; --list이면 기록 조회 |
 | dust patch --file FILE INSTRUCTION | 파일과 편집 지시 | SEARCH/REPLACE 적용; --dry-run이면 블록만 출력 |
 
 ## 실행과 파이프
@@ -31,6 +31,10 @@ aliases: [CLI 스펙, 인터페이스 명세]
 dust run ./apps/coverage-reader --json "discovered=290 observed=100"
 dust pack ./apps/coverage-reader
 dust run ./coverage-reader-0.1.0.dustpkg "discovered=290 observed=100"
+dust pack ./apps/coverage-reader --encrypt -o ./coverage-reader-private.dustpkg
+dust pack ./apps/coverage-reader --encrypt --passphrase "$DUST_PASSPHRASE" -o ./coverage-reader-private.dustpkg
+dust run ./coverage-reader-private.dustpkg "입력" # 터미널에서 암호 입력
+dust run ./coverage-reader-private.dustpkg --passphrase "$DUST_PASSPHRASE" "입력"
 git diff --cached | dust run commit_gen
 ```
 
@@ -41,6 +45,7 @@ run은 INPUT이 없으면 STDIN을 읽는다. 옵션은 입력 문장 앞에 둔
 | run 옵션 | 의미 |
 | --- | --- |
 | --json | 미완료 실행도 구조화된 보고서로 STDOUT 출력 |
+| --passphrase VALUE | 암호화 패키지 해제; 생략하면 터미널에서 입력 |
 | --report PATH | 종료 보고서를 별도 파일로 저장 |
 | --checkpoint PATH | 자동 임시 체크포인트 대신 지정 경로에 저장; 새 파일 필요 |
 | --resume PATH | 저장된 대화 재개 및 선택적 추가 프롬프트; --checkpoint와 동시 사용 불가 |
@@ -73,6 +78,8 @@ DUST_PACKAGE_HOME=./local-packages dust run coverage-reader "입력"
 ```
 
 pack의 출력 부모 디렉터리는 미리 있어야 하며 출력은 원본 패키지 밖에 둔다. pack/install/new는 기존 대상을 덮어쓰지 않는다. 앱에 선언된 skill만 전용 읽기 도구에 표시된다. 파일 구조·접근 제한·배포 규격은 [[14_앱_패키지_및_스킬]]을 참고한다.
+
+`dust pack --encrypt`는 기본적으로 숨김 터미널 입력을 두 번 받아 전체 압축 아카이브를 AES-256-GCM으로 암호화한다. `--passphrase VALUE`를 `pack --encrypt`, `run`, `acp`, `learn`에 주면 터미널 입력 없이 실행할 수 있다. 이 값은 셸 기록과 프로세스 목록에 노출될 수 있다. 암호는 12~1024바이트이며 패키지 이름과 버전은 헤더에 남는다. 암호화 패키지는 설치 시에도 암호문으로 저장된다. 암호화는 저장·배포 중인 파일을 보호하지만 실행 메모리, 모델 요청, 실행 기록 및 체크포인트에는 해제된 프롬프트가 들어갈 수 있다.
 
 ## 편집 명령
 

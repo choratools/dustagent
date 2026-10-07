@@ -211,6 +211,89 @@ async fn archive_resume_survives_extraction_path_change_but_rejects_modified_res
     assert_eq!(loaded.digest, first.digest);
 }
 
+#[test]
+fn encrypted_packages_hide_contents_require_a_passphrase_and_authenticate_data() {
+    const PASSPHRASE: &[u8] = b"correct horse battery staple";
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    fixture(&source);
+    let package_path = dir.path().join("fixture-1.0.0.dustpkg");
+    package::pack_encrypted(&source, Some(&package_path), PASSPHRASE).unwrap();
+    let encrypted = std::fs::read(&package_path).unwrap();
+    assert!(
+        !encrypted
+            .windows(b"Read evidence".len())
+            .any(|part| part == b"Read evidence")
+    );
+    assert!(
+        !encrypted
+            .windows(b"SECRET_MARKER".len())
+            .any(|part| part == b"SECRET_MARKER")
+    );
+    assert!(matches!(
+        package::load(package_path.to_str().unwrap(), dir.path()),
+        Err(dustagent::DustError::PackagePassphraseRequired)
+    ));
+    assert!(
+        package::load_with_password(
+            package_path.to_str().unwrap(),
+            dir.path(),
+            b"this is the wrong passphrase"
+        )
+        .is_err()
+    );
+    let loaded =
+        package::load_with_password(package_path.to_str().unwrap(), dir.path(), PASSPHRASE)
+            .unwrap();
+    assert_eq!(
+        loaded.manifest.system_prompt.as_deref(),
+        Some("Read evidence")
+    );
+
+    let tampered_header_path = dir.path().join("tampered-header.dustpkg");
+    let mut tampered_header = encrypted.clone();
+    tampered_header[12] = b'g'; // package name remains syntactically valid but is authenticated
+    std::fs::write(&tampered_header_path, tampered_header).unwrap();
+    assert!(
+        package::load_with_password(
+            tampered_header_path.to_str().unwrap(),
+            dir.path(),
+            PASSPHRASE
+        )
+        .is_err()
+    );
+
+    let store = dir.path().join("store");
+    let installed = package::install(&package_path, &store).unwrap();
+    assert_eq!(
+        installed.extension().and_then(|s| s.to_str()),
+        Some("dustpkg")
+    );
+    assert!(matches!(
+        package::load(installed.to_str().unwrap(), dir.path()),
+        Err(dustagent::DustError::PackagePassphraseRequired)
+    ));
+    assert_eq!(
+        package::load_with_password(installed.to_str().unwrap(), dir.path(), PASSPHRASE)
+            .unwrap()
+            .manifest
+            .package
+            .unwrap()
+            .name,
+        "fixture"
+    );
+
+    let tampered_path = dir.path().join("tampered.dustpkg");
+    let mut tampered = encrypted;
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+    std::fs::write(&tampered_path, tampered).unwrap();
+    assert!(
+        package::load_with_password(tampered_path.to_str().unwrap(), dir.path(), PASSPHRASE)
+            .is_err()
+    );
+}
+
 fn serve_once() -> String {
     serve_message("package complete", true)
 }
@@ -316,6 +399,99 @@ fn cli_packs_installs_and_runs_all_three_package_sources() {
         let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(report["output"], "package complete");
     }
+
+    const PASSPHRASE: &str = "inline test passphrase";
+    let encrypted_archive = dir.path().join("fixture-private.dustpkg");
+    let encrypted_store = dir.path().join("encrypted-store");
+    let result = Command::new(env!("CARGO_BIN_EXE_dust"))
+        .args([
+            "pack",
+            source.to_str().unwrap(),
+            "--encrypt",
+            "--passphrase",
+            PASSPHRASE,
+            "--output",
+            encrypted_archive.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let ciphertext = std::fs::read(&encrypted_archive).unwrap();
+    assert!(
+        !ciphertext
+            .windows(b"Read evidence".len())
+            .any(|s| s == b"Read evidence")
+    );
+    let result = Command::new(env!("CARGO_BIN_EXE_dust"))
+        .args([
+            "install",
+            encrypted_archive.to_str().unwrap(),
+            "--store",
+            encrypted_store.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let url = serve_once();
+    let result = Command::new(env!("CARGO_BIN_EXE_dust"))
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env("DUST_PACKAGE_HOME", &encrypted_store)
+        .env("OPENAI_API_KEY", "test-only")
+        .env("OPENAI_BASE_URL", url)
+        .args([
+            "run",
+            "fixture",
+            "--passphrase",
+            PASSPHRASE,
+            "--json",
+            "original input",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["output"], "package complete");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_dust"))
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env("DUST_PACKAGE_HOME", &encrypted_store)
+        .args(["learn", "fixture", "--passphrase", PASSPHRASE, "--list"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"[]\n");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_dust"))
+        .current_dir(dir.path())
+        .env("DUST_PACKAGE_HOME", &encrypted_store)
+        .args(["acp", "fixture", "--passphrase", PASSPHRASE])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(result.stdout.is_empty());
 }
 
 #[tokio::test]

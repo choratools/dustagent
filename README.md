@@ -110,7 +110,7 @@ DustAgent provides these individual commands. A single command that automaticall
 | `dust run <APP> [INPUT...]` | Run an app by name, JSON manifest path, package directory, or `.dustpkg` path |
 | `dust acp <APP>` | Serve an app through ACP v1 over stdio for compatible clients |
 | `dust new <NAME> <DESCRIPTION>` | Generate `apps/<NAME>/app.json` and an empty `skills/` directory using an LLM |
-| `dust pack <SOURCE>` | Pack an application directory into a `.dustpkg` archive |
+| `dust pack <SOURCE> [--encrypt] [--passphrase VALUE]` | Pack an application directory; `--encrypt` protects the full archive with a passphrase |
 | `dust install <SOURCE>` | Install a local directory or `.dustpkg` package |
 | `dust learn <APP>` | Investigate and review recorded examples for future reuse |
 | `dust patch --file <FILE> <INSTRUCTION>` | Apply generated SEARCH/REPLACE blocks to a file |
@@ -131,6 +131,7 @@ git diff --cached | dust run commit_gen
 | Option | Purpose |
 | :--- | :--- |
 | `-m, --model MODEL` | Override the model |
+| `--passphrase PASSPHRASE` | Unlock an encrypted package without a terminal prompt |
 | `--max-turns N` | Set this invocation's model turn budget |
 | `--timeout-ms MS` | Set the overall time budget, including startup and automatic experience review |
 | `--tool-timeout-ms MS` | Set the individual tool timeout |
@@ -150,7 +151,7 @@ dust acp ./apps/coverage-reader
 dust acp ./coverage-reader-0.1.0.dustpkg --model MODEL --timeout-ms 120000
 ```
 
-Configure an ACP client to launch `dust` with arguments `["acp", "/absolute/path/to/app"]` and the same API environment or file-backed Codex login used by `run`. `APP` accepts an app name, manifest, directory, or archive; installation is optional. Options are `--model`, `--max-turns`, `--timeout-ms`, and `--tool-timeout-ms`.
+Configure an ACP client to launch `dust` with arguments `["acp", "/absolute/path/to/app"]` and the same API environment or file-backed Codex login used by `run`. `APP` accepts an app name, manifest, directory, or archive; installation is optional. Options are `--passphrase`, `--model`, `--max-turns`, `--timeout-ms`, and `--tool-timeout-ms`.
 
 STDIN/STDOUT carry newline-delimited JSON-RPC only. Each session preserves conversation, working state, and tool evidence, and uses its own client-supplied working directory. Model turns and time budgets reset per prompt. Tool progress and assistant messages are emitted as `session/update`; model text is delivered after each model response, rather than token by token.
 
@@ -174,14 +175,27 @@ dust new reviewer "Review a diff" --stdout
 dust pack ./apps/summarizer -o ./summarizer-0.1.0.dustpkg
 dust install ./summarizer-0.1.0.dustpkg
 dust run summarizer "input"
+
+# Encrypt a new archive; Dust prompts twice without echoing the passphrase.
+dust pack ./apps/summarizer --encrypt -o ./summarizer-private.dustpkg
+dust install ./summarizer-private.dustpkg
+dust run summarizer "input"  # prompts for the passphrase
+
+# Inline option for scripts or non-interactive launchers.
+dust pack ./apps/summarizer --encrypt --passphrase "$DUST_PASSPHRASE" -o ./summarizer-private.dustpkg
+dust run summarizer --passphrase "$DUST_PASSPHRASE" "input"
+dust acp summarizer --passphrase "$DUST_PASSPHRASE"
+dust learn summarizer --passphrase "$DUST_PASSPHRASE" --list
 ```
 
 | Command option | Purpose |
 | :--- | :--- |
 | `pack -o, --output PATH` | Set the archive output path; defaults to `<name>-<version>.dustpkg` |
+| `pack --encrypt` | Encrypt the complete compressed package using a hidden passphrase prompt |
+| `--passphrase PASSPHRASE` | Supply a package passphrase inline to `pack --encrypt`, `run`, `acp`, or `learn` |
 | `install --store PATH` | Override the installation store; defaults to `~/.dustagent/packages` or `DUST_PACKAGE_HOME` |
 
-The archive output must be outside its source directory, with an existing parent directory. Existing output files and installed packages are not overwritten. For an explicit `--store`, set `DUST_PACKAGE_HOME` to the same directory when running by installed name, or run the installed directory directly.
+The archive output must be outside its source directory, with an existing parent directory. Existing output files and installed packages are not overwritten. Encrypted packages install as ciphertext and decrypt only when run; `dust run`, `dust acp`, and `dust learn` prompt for the passphrase unless `--passphrase` is supplied. The inline value is visible in shell history and process listings, so the hidden terminal prompt is safer for interactive use. For an explicit `--store`, set `DUST_PACKAGE_HOME` to the same directory when running by installed name, or run the installed package path directly.
 
 ### Learn
 
@@ -193,6 +207,7 @@ dust learn summarizer --list
 | Option | Purpose |
 | :--- | :--- |
 | `--list` | Inspect records and review reasons without calling the model |
+| `--passphrase PASSPHRASE` | Unlock an encrypted package without a terminal prompt |
 | `-m, --model MODEL` | Select the review model |
 | `--experience-dir PATH` | Override the experience directory |
 
@@ -226,7 +241,9 @@ dust run coverage-reader "discovered=290 observed=100 distinct items"
 
 A package contains root `app.json`, its own `skills/`, and optional README/LICENSE files. The manifest declares `package: {"name":"coverage-reader","version":"0.1.0","dust_version":">=0.1.0"}` and `skills: ["coverage"]`. Each declared skill has YAML-frontmatter `SKILL.md` plus optional `references/`, `scripts/`, and `assets/`, following the [Agent Skills directory format](https://agentskills.io/specification). Names and descriptions are shown first; `dustagent__read_skill` loads instructions or UTF-8 resource files on demand. Undeclared skills, path traversal, and symlinks are rejected. Reads are limited to 64 KiB; binaries can be bundled but cannot be read through this text tool.
 
-`.dustpkg` is a bounded tar.gz archive with root contents. Packing and installing validate declared skills and never run hooks or skill scripts. Existing destinations are not overwritten. Runtime compatibility accepts an exact `X.Y.Z` or `>=X.Y.Z`. The default store is `~/.dustagent/packages`; set `DUST_PACKAGE_HOME`, or use `install --store` with the same store when resolving installed names. Archive execution uses a private temporary directory and removes it after the run. Package content hashes bind checkpoint resume across extraction locations.
+Plain `.dustpkg` files are bounded tar.gz archives with root contents. `pack --encrypt` encrypts the entire compressed archive with AES-256-GCM; Argon2id derives the key from the passphrase. Only package name and version remain visible in the encrypted file header. A wrong passphrase or modified ciphertext is rejected before extraction. Packing and installing validate declared skills and never run hooks or skill scripts. Existing destinations are not overwritten. Runtime compatibility accepts an exact `X.Y.Z` or `>=X.Y.Z`. The default store is `~/.dustagent/packages`; set `DUST_PACKAGE_HOME`, or use `install --store` with the same store when resolving installed names. Archive execution decrypts into a private temporary directory and removes it after the run. Package content hashes bind checkpoint resume across extraction locations.
+
+Encryption protects a package at rest and while it is distributed; it does not hide prompts from someone who has the passphrase and runs the app. Runtime memory, the model request, and Dust's normal execution history/checkpoints can contain decrypted prompt text. The passphrase is not recoverable, so keep a secure backup.
 
 Skill access restrictions apply to the native skill reader. Explicit MCP servers and checkers keep their declared capabilities; this is not a process sandbox. Their executables/dependencies must already be installed, and relative command/checker paths still resolve from the caller's working directory. `allowed-tools` metadata does not grant execution permissions. See [package and skill guide](docs/14_앱_패키지_및_스킬.md).
 

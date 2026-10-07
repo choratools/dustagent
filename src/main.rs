@@ -1,6 +1,7 @@
 use std::io::{IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand};
 use dustagent::AutoProvider;
@@ -12,6 +13,7 @@ use dustagent::domain::patch::{LineRange, extract_blocks};
 use dustagent::ports::llm::{ChatMessage, LlmProvider};
 use dustagent::ports::patcher::CodePatcher;
 use dustagent::{ExecutionReport, StopReason};
+use zeroize::Zeroizing;
 
 /// Built-in scaffold system prompt used when `apps/scaffold.json` is absent.
 const SCAFFOLD_SYSTEM_PROMPT: &str = r#"You are DustAgent Scaffold. Generate a DustAgent application manifest.
@@ -75,6 +77,9 @@ enum Commands {
 struct AcpArgs {
     /// App name, JSON manifest, directory, or .dustpkg path
     app: String,
+    /// Passphrase for an encrypted package (visible in shell history/process listings)
+    #[arg(long, value_name = "PASSPHRASE")]
+    passphrase: Option<SecretPassphrase>,
     #[arg(short, long)]
     model: Option<String>,
     #[arg(long)]
@@ -90,6 +95,12 @@ struct PackArgs {
     source: PathBuf,
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// Encrypt the complete package; prompts unless --passphrase is provided
+    #[arg(long)]
+    encrypt: bool,
+    /// Supply the encryption passphrase inline (visible in shell history/process listings)
+    #[arg(long, requires = "encrypt", value_name = "PASSPHRASE")]
+    passphrase: Option<SecretPassphrase>,
 }
 
 #[derive(Args, Debug)]
@@ -103,6 +114,9 @@ struct InstallArgs {
 #[derive(Args, Debug)]
 struct LearnArgs {
     app: String,
+    /// Passphrase for an encrypted package (visible in shell history/process listings)
+    #[arg(long, value_name = "PASSPHRASE")]
+    passphrase: Option<SecretPassphrase>,
     /// Inspect records and review reasons without calling the model
     #[arg(long)]
     list: bool,
@@ -116,6 +130,10 @@ struct LearnArgs {
 struct RunArgs {
     /// Application name in apps/ (e.g. crawler, patcher) or path to manifest
     app: String,
+
+    /// Passphrase for an encrypted package (visible in shell history/process listings)
+    #[arg(long, value_name = "PASSPHRASE")]
+    passphrase: Option<SecretPassphrase>,
 
     /// Record runs and automatically review/reuse useful past examples
     #[arg(long)]
@@ -160,6 +178,33 @@ struct RunArgs {
     /// Override default LLM model
     #[arg(short, long)]
     model: Option<String>,
+}
+
+#[derive(Clone)]
+struct SecretPassphrase(Zeroizing<String>);
+
+impl FromStr for SecretPassphrase {
+    type Err = std::convert::Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self(Zeroizing::new(value.to_owned())))
+    }
+}
+
+impl std::fmt::Debug for SecretPassphrase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+impl SecretPassphrase {
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
 }
 
 #[derive(Args, Debug)]
@@ -216,6 +261,21 @@ async fn main() -> ExitCode {
 
     match cli.command {
         Commands::Acp(args) => {
+            let current_dir = match std::env::current_dir() {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("Error: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let loaded_app =
+                match load_app_for_cli(&args.app, &current_dir, args.passphrase.as_ref()) {
+                    Ok(app) => app,
+                    Err(error) => {
+                        eprintln!("Error: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                };
             let options = dustagent::adapters::acp::AcpOptions {
                 app: args.app,
                 model: args.model,
@@ -223,7 +283,7 @@ async fn main() -> ExitCode {
                 timeout_ms: args.timeout_ms,
                 tool_timeout_ms: args.tool_timeout_ms,
             };
-            match dustagent::adapters::acp::serve_stdio(options).await {
+            match dustagent::adapters::acp::serve_stdio_with_app(options, loaded_app).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("Error: {error}");
@@ -231,10 +291,7 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        Commands::Pack(args) => artifact_exit(dustagent::application::package::pack(
-            &args.source,
-            args.output.as_deref(),
-        )),
+        Commands::Pack(args) => artifact_exit(handle_pack(args)),
         Commands::Install(args) => {
             let result = args
                 .store
@@ -285,6 +342,72 @@ fn artifact_exit(result: dustagent::Result<PathBuf>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn handle_pack(args: PackArgs) -> dustagent::Result<PathBuf> {
+    let PackArgs {
+        source,
+        output,
+        encrypt,
+        passphrase,
+    } = args;
+    if !encrypt {
+        return dustagent::application::package::pack(&source, output.as_deref());
+    }
+    let passphrase = match passphrase {
+        Some(passphrase) => passphrase,
+        None => {
+            let passphrase = read_package_passphrase("New package passphrase: ")?;
+            let confirmation = read_package_passphrase("Confirm passphrase: ")?;
+            if passphrase.as_str() != confirmation.as_str() {
+                return Err(dustagent::DustError::Config(
+                    "Package passphrases do not match".into(),
+                ));
+            }
+            passphrase
+        }
+    };
+    dustagent::application::package::pack_encrypted(
+        &source,
+        output.as_deref(),
+        passphrase.as_bytes(),
+    )
+}
+
+fn load_app_for_cli(
+    source: &str,
+    base: &Path,
+    passphrase: Option<&SecretPassphrase>,
+) -> anyhow::Result<dustagent::LoadedApp> {
+    if let Some(passphrase) = passphrase {
+        return Ok(dustagent::application::package::load_with_password(
+            source,
+            base,
+            passphrase.as_bytes(),
+        )?);
+    }
+    match dustagent::application::package::load(source, base) {
+        Ok(app) => Ok(app),
+        Err(dustagent::DustError::PackagePassphraseRequired) => {
+            let passphrase = read_package_passphrase("Package passphrase: ")?;
+            Ok(dustagent::application::package::load_with_password(
+                source,
+                base,
+                passphrase.as_bytes(),
+            )?)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_package_passphrase(prompt: &str) -> dustagent::Result<SecretPassphrase> {
+    rpassword::prompt_password(prompt)
+        .map(|passphrase| SecretPassphrase(Zeroizing::new(passphrase)))
+        .map_err(|error| {
+            dustagent::DustError::Config(format!(
+                "Cannot read package passphrase from a terminal: {error}"
+            ))
+        })
 }
 
 async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
@@ -393,7 +516,7 @@ async fn handle_new(args: NewArgs) -> anyhow::Result<()> {
 
 async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
     let current_dir = std::env::current_dir()?;
-    let loaded_app = dustagent::application::package::load(&args.app, &current_dir)?;
+    let loaded_app = load_app_for_cli(&args.app, &current_dir, args.passphrase.as_ref())?;
     let manifest = loaded_app.manifest.clone();
     let automatic_checkpoint = if args.resume.is_none() && args.checkpoint.is_none() {
         let mut builder = tempfile::Builder::new();
@@ -746,7 +869,11 @@ fn experience_directory(path: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 }
 
 async fn handle_learn(args: LearnArgs) -> anyhow::Result<()> {
-    let loaded_app = dustagent::application::package::load(&args.app, &std::env::current_dir()?)?;
+    let loaded_app = load_app_for_cli(
+        &args.app,
+        &std::env::current_dir()?,
+        args.passphrase.as_ref(),
+    )?;
     let manifest = loaded_app.manifest.clone();
     let store = ExperienceStore::new(experience_directory(args.experience_dir)?);
     if args.list {

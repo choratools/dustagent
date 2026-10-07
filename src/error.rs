@@ -34,6 +34,9 @@ pub enum DustError {
     #[error("Manifest error: {0}")]
     Manifest(String),
 
+    #[error("Encrypted package requires a passphrase")]
+    PackagePassphraseRequired,
+
     #[error("Configuration error: {0}")]
     Config(String),
 }
