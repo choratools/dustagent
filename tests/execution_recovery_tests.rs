@@ -79,6 +79,24 @@ async fn transient_retry_preserves_messages_and_does_not_spend_another_turn() {
     );
 }
 #[tokio::test]
+async fn retry_after_overrides_short_local_backoff() {
+    let provider = Provider::new(vec![
+        Err(DustError::ProviderRetryable {
+            kind: ProviderFailure::Transient,
+            message: "rate limited".into(),
+            retry_after: Some(std::time::Duration::from_millis(30)),
+        }),
+        Ok(LlmResponse::text("done")),
+    ]);
+    let mut core = DustCore::new(policy(1), provider).with_max_turns(1);
+    let started = std::time::Instant::now();
+    let report = core.execute_report("input").await;
+    assert_eq!(report.stop_reason, StopReason::Completed);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(25));
+    assert_eq!(report.provider_retries.len(), 1);
+    assert!(report.provider_retries[0].delay_ms >= 25);
+}
+#[tokio::test]
 async fn permanent_legacy_and_exhausted_failures_stop_with_bounded_requests() {
     for (replies, expected, retries) in [
         (

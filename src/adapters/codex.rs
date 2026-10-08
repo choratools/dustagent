@@ -3,6 +3,7 @@
 //! Only finalized output items are exposed, and only after response.completed.
 //! No backend response body or authentication value is included in errors.
 use super::codex_auth::{CodexAuth, Credentials};
+use crate::application::retry::parse_retry_after;
 use crate::error::ProviderFailure;
 use crate::ports::llm::{
     ChatMessage, LlmCompletion, LlmProvider, LlmResponse, LlmUsage, ToolCall, ToolDefinition,
@@ -179,6 +180,18 @@ impl LlmProvider for CodexProvider {
                 } else {
                     ProviderFailure::Permanent
                 };
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_retry_after);
+            if kind == ProviderFailure::Transient && retry_after.is_some() {
+                return Err(DustError::ProviderRetryable {
+                    kind,
+                    message: format!("Codex API error ({status})"),
+                    retry_after,
+                });
+            }
             return Err(failure(kind, &format!("Codex API error ({status})")));
         }
         let mut parser = SseParser::default();

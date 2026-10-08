@@ -1365,15 +1365,29 @@ impl<P: LlmProvider> DustCore<P> {
                         if err.is_retryable_provider_failure()
                             && retry_index < retry_config.max_retries =>
                     {
-                        let delay = retry_config.delay(retry_index);
+                        let requested_delay = retry_config
+                            .delay_with_retry_after(retry_index, err.provider_retry_after());
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        let delay = requested_delay.min(remaining);
                         retry_index += 1;
                         let wait_started = Instant::now();
-                        let waiting = wait_until(
-                            deadline,
-                            self.cancellation.clone(),
-                            tokio::time::sleep(delay),
-                        )
-                        .await;
+                        let waiting = if requested_delay < remaining {
+                            wait_until(
+                                deadline,
+                                self.cancellation.clone(),
+                                tokio::time::sleep(delay),
+                            )
+                            .await
+                        } else {
+                            // Do not retry when the requested delay consumes the remaining
+                            // budget. A pending future avoids constructing an overflowing sleep.
+                            wait_until(
+                                deadline,
+                                self.cancellation.clone(),
+                                std::future::pending::<()>(),
+                            )
+                            .await
+                        };
                         report.provider_retries.push(super::execution::RetryRecord {
                             turn,
                             attempt: retry_index,

@@ -1,3 +1,4 @@
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -28,6 +29,14 @@ pub enum DustError {
         message: String,
     },
 
+    /// A retryable provider response that may carry an explicit server retry delay.
+    #[error("Provider {kind:?}: {message}")]
+    ProviderRetryable {
+        kind: ProviderFailure,
+        message: String,
+        retry_after: Option<Duration>,
+    },
+
     #[error("LLM error: {0}")]
     Llm(String),
 
@@ -50,7 +59,17 @@ impl DustError {
             Self::Provider {
                 kind: ProviderFailure::Transient,
                 ..
+            } | Self::ProviderRetryable {
+                kind: ProviderFailure::Transient,
+                ..
             }
         )
+    }
+
+    pub fn provider_retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::ProviderRetryable { retry_after, .. } => *retry_after,
+            _ => None,
+        }
     }
 }

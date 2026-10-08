@@ -367,7 +367,7 @@ Apps can opt into feedback validation without prescribing an exploration sequenc
 ```json
 {
   "working_state": true,
-  "provider_retry": {"max_retries": 2, "base_delay_ms": 250},
+  "provider_retry": {"max_retries": 5, "base_delay_ms": 1000},
   "validation": {
     "mode": "feedback",
     "command": "python3",

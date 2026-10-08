@@ -1,3 +1,4 @@
+use crate::application::retry::parse_retry_after;
 use crate::error::ProviderFailure;
 use crate::ports::llm::{
     ChatMessage, LlmCompletion, LlmProvider, LlmResponse, LlmUsage, ToolCall, ToolDefinition,
@@ -205,6 +206,18 @@ impl LlmProvider for OpenAiProvider {
                 408 | 429 | 500 | 502 | 503 | 504 => ProviderFailure::Transient,
                 _ => ProviderFailure::Permanent,
             };
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_retry_after);
+            if kind == ProviderFailure::Transient && retry_after.is_some() {
+                return Err(DustError::ProviderRetryable {
+                    kind,
+                    message: format!("OpenAI API error ({status})"),
+                    retry_after,
+                });
+            }
             return Err(DustError::Provider {
                 kind,
                 message: format!("OpenAI API error ({status})"),
