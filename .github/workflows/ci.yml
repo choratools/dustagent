@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [ "master", "main" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "master", "main" ]
+    branches: [ "main" ]
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,17 +16,20 @@ env:
 jobs:
   check-and-test:
     name: Check & Test (Linux)
-    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, route-one, "r1-run-${{ github.run_id }}-check-and-test"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
         with:
           components: rustfmt, clippy
 
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
       - name: Check code formatting
         run: cargo fmt --check
