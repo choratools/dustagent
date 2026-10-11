@@ -1,3 +1,4 @@
+use crate::error::ProviderDiagnostics;
 use crate::ports::llm::LlmUsage;
 use crate::{DustError, Result};
 use serde::{Deserialize, Serialize};
@@ -19,10 +20,28 @@ pub enum StopReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
+    /// The request was persisted before dispatch; its external outcome may be unknown.
+    InFlight,
     Succeeded,
     Failed,
     TimedOut,
     InvalidArguments,
+    /// This call followed an interrupted call in the same batch and was never dispatched.
+    NotExecuted,
+    /// An operator supplied a result after checking the external system.
+    Reconciled,
+}
+
+/// Declared side-effect semantics for a tool call. This is configuration and
+/// reporting metadata, not something inferred from the tool name or response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    Local,
+    ReadOnly,
+    Idempotent,
+    #[default]
+    ExternalUnknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +50,10 @@ pub struct ToolRecord {
     pub call_id: String,
     pub name: String,
     pub arguments: Value,
+    #[serde(default)]
+    pub effect: ToolEffect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub status: ToolStatus,
     pub elapsed_ms: u64,
     pub output: Option<String>,
@@ -48,6 +71,8 @@ pub struct TurnRecord {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_usage: Option<LlmUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_diagnostics: Option<ProviderDiagnostics>,
 }
 
 /// Aggregate of token counters reported by completed model responses.
@@ -179,6 +204,8 @@ pub struct CompactionAttempt {
     pub summary_token_source: Option<SummaryTokenSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_usage: Option<LlmUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_diagnostics: Option<ProviderDiagnostics>,
     #[serde(default)]
     pub max_summary_tokens: usize,
     pub max_summary_bytes: usize,
@@ -248,6 +275,8 @@ pub struct RetryRecord {
     pub attempt: usize,
     pub error: String,
     pub delay_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<ProviderDiagnostics>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidationAttempt {
@@ -276,6 +305,7 @@ mod token_usage_tests {
                 cached_input_tokens: Some(40),
                 reasoning_tokens: Some(10),
             }),
+            provider_diagnostics: None,
         });
         report.turns.push(TurnRecord {
             turn: 2,
@@ -288,6 +318,7 @@ mod token_usage_tests {
                 input_tokens: Some(8),
                 ..LlmUsage::default()
             }),
+            provider_diagnostics: None,
         });
         report.compaction_attempts.push(CompactionAttempt {
             turn: 2,
@@ -303,6 +334,7 @@ mod token_usage_tests {
                 cached_input_tokens: Some(20),
                 reasoning_tokens: Some(5),
             }),
+            provider_diagnostics: None,
             max_summary_tokens: 10,
             max_summary_bytes: 100,
             tool_call_count: 0,
@@ -315,6 +347,7 @@ mod token_usage_tests {
             attempt: 1,
             error: "retryable provider error".into(),
             delay_ms: 1,
+            diagnostics: None,
         });
 
         report.refresh_token_usage();

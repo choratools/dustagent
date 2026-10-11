@@ -1,5 +1,7 @@
 use super::checkpoint::{self, Checkpoint, CheckpointPhase};
-use super::execution::{ExecutionReport, StopReason, ToolRecord, ToolStatus, TurnRecord};
+use super::execution::{
+    ExecutionReport, StopReason, ToolEffect, ToolRecord, ToolStatus, TurnRecord,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,9 +12,44 @@ use super::experience::ExperienceStore;
 use crate::adapters::builtin::BuiltinToolClient;
 use crate::adapters::mcp_stdio::McpStdioClient;
 use crate::domain::manifest::AppManifest;
-use crate::ports::llm::{ChatMessage, LlmProvider, ToolDefinition};
+use crate::ports::llm::{ChatMessage, LlmProvider, ToolCall, ToolDefinition};
 use crate::ports::mcp::McpClient;
 use crate::{DustError, Result};
+
+const MAX_PARALLEL_SAFE_TOOLS: usize = 4;
+
+#[derive(Debug, Clone)]
+enum ToolDispatch {
+    Observed {
+        output: String,
+        elapsed_ms: u64,
+    },
+    Failed {
+        error: String,
+        elapsed_ms: u64,
+    },
+    Cancelled {
+        elapsed_ms: u64,
+    },
+    TimedOut {
+        elapsed_ms: u64,
+        stop_reason: StopReason,
+    },
+}
+
+enum ParallelBatch {
+    NotEligible,
+    PersistenceFailed,
+    Complete(Vec<ToolDispatch>),
+}
+
+#[derive(Clone, Copy)]
+struct ExecutionCheckpointContext<'a> {
+    user_input: &'a str,
+    messages: &'a [ChatMessage],
+    started: Instant,
+    prior_ms: u64,
+}
 
 /// Ultra-lightweight execution kernel orchestrating AppManifest, Scoped MCP Tools, and LLM Provider.
 pub struct DustCore<P: LlmProvider> {
@@ -451,6 +488,7 @@ impl<P: LlmProvider> DustCore<P> {
         self.manifest.validate_native_namespace()?;
         for config in self.manifest.mcp_servers.values() {
             config.validate_chroot()?;
+            config.validate_tool_effects()?;
         }
         self.mcp_clients
             .entry("dustagent".into())
@@ -513,11 +551,64 @@ impl<P: LlmProvider> DustCore<P> {
             .await
             {
                 Ok(Ok(srv_tools)) => {
+                    let configured = self.manifest.mcp_servers.get(srv_name);
+                    let mut discovered = std::collections::HashSet::new();
                     for tool in srv_tools {
+                        discovered.insert(tool.name.clone());
+                        if let Some(config) = configured {
+                            let read_only = config.read_only_tools.contains(&tool.name);
+                            let idempotent = config.idempotent_tools.contains(&tool.name);
+                            if read_only && idempotent {
+                                return Err(DustError::Manifest(format!(
+                                    "MCP tool '{srv_name}__{}' cannot be both read-only and idempotent",
+                                    tool.name
+                                )));
+                            }
+                            if idempotent {
+                                let key = config.idempotency_key_argument.as_deref().ok_or_else(|| {
+                                    DustError::Manifest(format!(
+                                        "MCP tool '{srv_name}__{}' requires idempotency_key_argument",
+                                        tool.name
+                                    ))
+                                })?;
+                                let schema = &tool.input_schema;
+                                let key_is_string = schema
+                                    .get("properties")
+                                    .and_then(|properties| properties.get(key))
+                                    .and_then(|property| property.get("type"))
+                                    .and_then(Value::as_str)
+                                    == Some("string");
+                                let key_is_optional = !schema
+                                    .get("required")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|required| {
+                                        required.iter().any(|name| name.as_str() == Some(key))
+                                    });
+                                if !key_is_string || !key_is_optional {
+                                    return Err(DustError::Manifest(format!(
+                                        "MCP tool '{srv_name}__{}' must declare optional string property '{key}' for idempotency",
+                                        tool.name
+                                    )));
+                                }
+                            }
+                        }
                         let namespaced_name = format!("{srv_name}__{}", tool.name);
                         let mut td: ToolDefinition = tool.into();
                         td.name = namespaced_name;
                         tools.push(td);
+                    }
+                    if let Some(config) = configured {
+                        for declared in config
+                            .read_only_tools
+                            .iter()
+                            .chain(config.idempotent_tools.iter())
+                        {
+                            if !discovered.contains(declared) {
+                                return Err(DustError::Manifest(format!(
+                                    "MCP server '{srv_name}' does not expose declared effect tool '{declared}'"
+                                )));
+                            }
+                        }
                     }
                 }
                 Ok(Err(err)) => {
@@ -577,6 +668,335 @@ impl<P: LlmProvider> DustCore<P> {
             ToolDefinition::new("dustagent__history_directory", "Discover what archived originals contain before searching. Lists compaction ranges, unverified topic descriptions, literal keywords with original record indexes, and previews. Only this execution/session is accessible; use history_read to verify originals.", serde_json::json!({"type":"object","properties":{"query":{"type":"string","maxLength":256},"cursor":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":10}},"additionalProperties":false})),
         ]);
         Ok(tools)
+    }
+
+    fn tool_effect(&self, full_tool_name: &str) -> ToolEffect {
+        let Some((server, tool)) = full_tool_name.split_once("__") else {
+            return ToolEffect::ExternalUnknown;
+        };
+        if server == "dustagent" {
+            return match full_tool_name {
+                "dustagent__history_read"
+                | "dustagent__history_search"
+                | "dustagent__history_directory"
+                | "dustagent__state_get"
+                | "dustagent__state_list"
+                | "dustagent__read_skill" => ToolEffect::ReadOnly,
+                _ => ToolEffect::Local,
+            };
+        }
+        let Some(config) = self.manifest.mcp_servers.get(server) else {
+            return ToolEffect::ExternalUnknown;
+        };
+        if config.read_only_tools.iter().any(|name| name == tool) {
+            ToolEffect::ReadOnly
+        } else if config.idempotent_tools.iter().any(|name| name == tool) {
+            ToolEffect::Idempotent
+        } else {
+            ToolEffect::ExternalUnknown
+        }
+    }
+
+    fn prepare_tool_arguments(
+        &self,
+        full_tool_name: &str,
+        mut arguments: Value,
+    ) -> Result<(Value, ToolEffect, Option<String>)> {
+        let effect = self.tool_effect(full_tool_name);
+        let server = full_tool_name.split_once("__").map(|(server, _)| server);
+        let operation_id = server
+            .filter(|server| *server != "dustagent")
+            .map(|_| uuid::Uuid::new_v4().to_string());
+        if effect == ToolEffect::Idempotent {
+            let (server, _) = full_tool_name
+                .split_once("__")
+                .ok_or_else(|| DustError::Mcp("Invalid scoped tool name".into()))?;
+            let key_name = self
+                .manifest
+                .mcp_servers
+                .get(server)
+                .and_then(|config| config.idempotency_key_argument.as_deref())
+                .ok_or_else(|| {
+                    DustError::Manifest(format!(
+                        "Idempotent MCP tool '{full_tool_name}' has no idempotency key argument"
+                    ))
+                })?;
+            let object = arguments.as_object_mut().ok_or_else(|| {
+                DustError::Config("Idempotent MCP tool arguments must be an object".into())
+            })?;
+            object.insert(
+                key_name.to_owned(),
+                Value::String(
+                    operation_id
+                        .clone()
+                        .expect("external tools have operation IDs"),
+                ),
+            );
+        }
+        Ok((arguments, effect, operation_id))
+    }
+
+    fn apply_tool_dispatch(
+        &self,
+        record: &mut ToolRecord,
+        dispatch: ToolDispatch,
+        report: &mut ExecutionReport,
+    ) -> Option<String> {
+        match dispatch {
+            ToolDispatch::Observed { output, elapsed_ms } => {
+                record.elapsed_ms = elapsed_ms;
+                record.status = ToolStatus::Succeeded;
+                if serde_json::from_str::<Value>(&output)
+                    .ok()
+                    .and_then(|value| value.get("isError").and_then(Value::as_bool))
+                    == Some(true)
+                {
+                    record.status = ToolStatus::Failed;
+                    record.error = Some("MCP tool reported isError".into());
+                }
+                Some(output)
+            }
+            ToolDispatch::Failed { error, elapsed_ms } => {
+                record.elapsed_ms = elapsed_ms;
+                record.status = ToolStatus::Failed;
+                record.error = Some(error);
+                None
+            }
+            ToolDispatch::Cancelled { elapsed_ms } => {
+                record.elapsed_ms = elapsed_ms;
+                record.status = ToolStatus::TimedOut;
+                record.error = Some("Tool cancelled; remote outcome is unknown".into());
+                report.stop_reason = StopReason::Cancelled;
+                None
+            }
+            ToolDispatch::TimedOut {
+                elapsed_ms,
+                stop_reason,
+            } => {
+                record.elapsed_ms = elapsed_ms;
+                record.status = ToolStatus::TimedOut;
+                record.error = Some("Tool deadline exceeded".into());
+                report.stop_reason = stop_reason;
+                None
+            }
+        }
+    }
+
+    fn record_not_dispatched(
+        &mut self,
+        calls: &[ToolCall],
+        start: usize,
+        turn: usize,
+        messages: &mut Vec<ChatMessage>,
+        report: &mut ExecutionReport,
+    ) -> Result<()> {
+        for call in calls.iter().skip(start) {
+            let reason = "Earlier tool call has an unknown outcome; this call was not dispatched";
+            let result = ChatMessage::tool(
+                &call.id,
+                serde_json::json!({"error": "not_executed", "reason": reason}).to_string(),
+            );
+            self.archive_message(&result)?;
+            messages.push(result);
+            let record = ToolRecord {
+                turn,
+                call_id: call.id.clone(),
+                name: call.function_name.clone(),
+                arguments: call.parse_arguments::<Value>().unwrap_or(Value::Null),
+                effect: self.tool_effect(&call.function_name),
+                operation_id: None,
+                status: ToolStatus::NotExecuted,
+                elapsed_ms: 0,
+                output: None,
+                error: Some(reason.into()),
+                truncated: false,
+            };
+            report.tool_calls.push(record.clone());
+            self.emit(super::events::ExecutionEvent::ToolFinished { record });
+        }
+        Ok(())
+    }
+
+    async fn execute_parallel_safe_batch(
+        &mut self,
+        calls: &[ToolCall],
+        turn: usize,
+        deadline: Instant,
+        report: &mut ExecutionReport,
+        checkpoint_context: ExecutionCheckpointContext<'_>,
+    ) -> ParallelBatch {
+        if !(2..=MAX_PARALLEL_SAFE_TOOLS).contains(&calls.len()) {
+            return ParallelBatch::NotEligible;
+        }
+        let mut servers = std::collections::HashSet::new();
+        for call in calls {
+            let Some((server, tool)) = call.function_name.split_once("__") else {
+                return ParallelBatch::NotEligible;
+            };
+            let Some(config) = self.manifest.mcp_servers.get(server) else {
+                return ParallelBatch::NotEligible;
+            };
+            if server == "dustagent"
+                || !(config.read_only_tools.iter().any(|name| name == tool)
+                    || config.idempotent_tools.iter().any(|name| name == tool))
+                || !servers.insert(server.to_owned())
+                || !self.mcp_clients.contains_key(server)
+            {
+                return ParallelBatch::NotEligible;
+            }
+        }
+
+        let mut prepared = Vec::with_capacity(calls.len());
+        let mut records = Vec::with_capacity(calls.len());
+        for call in calls {
+            let Ok(raw_arguments) = call.parse_arguments::<Value>() else {
+                return ParallelBatch::NotEligible;
+            };
+            let Ok((arguments, effect, operation_id)) =
+                self.prepare_tool_arguments(&call.function_name, raw_arguments)
+            else {
+                return ParallelBatch::NotEligible;
+            };
+            if !matches!(effect, ToolEffect::ReadOnly | ToolEffect::Idempotent) {
+                return ParallelBatch::NotEligible;
+            }
+            let (server, tool) = call
+                .function_name
+                .split_once("__")
+                .expect("eligible calls are namespaced");
+            prepared.push((server.to_owned(), tool.to_owned(), arguments.clone()));
+            records.push(ToolRecord {
+                turn,
+                call_id: call.id.clone(),
+                name: call.function_name.clone(),
+                arguments,
+                effect,
+                operation_id,
+                status: ToolStatus::InFlight,
+                elapsed_ms: 0,
+                output: None,
+                error: None,
+                truncated: false,
+            });
+        }
+        report.tool_calls.extend(records.iter().cloned());
+        if !self.persist(
+            checkpoint_context.user_input,
+            checkpoint_context.messages,
+            report,
+            CheckpointPhase::ToolInFlight,
+            checkpoint_context.started,
+            checkpoint_context.prior_ms,
+        ) {
+            return ParallelBatch::PersistenceFailed;
+        }
+        for (call, record) in calls.iter().zip(&records) {
+            self.emit(super::events::ExecutionEvent::ToolStarted {
+                call_id: call.id.clone(),
+                name: call.function_name.clone(),
+                arguments: record.arguments.clone(),
+            });
+        }
+
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut task_indexes = HashMap::new();
+        for (index, (server, tool, arguments)) in prepared.into_iter().enumerate() {
+            let mut client = self
+                .mcp_clients
+                .remove(&server)
+                .expect("eligible MCP client was checked before dispatch");
+            let cancellation = self.cancellation.clone();
+            let tool_timeout_ms = self.tool_timeout_ms;
+            let task = tasks.spawn(async move {
+                let call_start = Instant::now();
+                let tool_deadline =
+                    (call_start + Duration::from_millis(tool_timeout_ms)).min(deadline);
+                let result = wait_until(
+                    tool_deadline,
+                    cancellation,
+                    client.call_tool(&tool, arguments),
+                )
+                .await;
+                let elapsed_ms = call_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                let (dispatch, reusable) = match result {
+                    Ok(Ok(value)) => match serde_json::to_string(&value) {
+                        Ok(output) => (ToolDispatch::Observed { output, elapsed_ms }, true),
+                        Err(error) => (
+                            ToolDispatch::Failed {
+                                error: error.to_string(),
+                                elapsed_ms,
+                            },
+                            false,
+                        ),
+                    },
+                    Ok(Err(error)) => (
+                        ToolDispatch::Failed {
+                            error: error.to_string(),
+                            elapsed_ms,
+                        },
+                        false,
+                    ),
+                    Err(WaitError::Cancelled) => (ToolDispatch::Cancelled { elapsed_ms }, false),
+                    Err(WaitError::Deadline) => (
+                        ToolDispatch::TimedOut {
+                            elapsed_ms,
+                            stop_reason: if tool_deadline == deadline {
+                                StopReason::TimeLimit
+                            } else {
+                                StopReason::ToolTimeout
+                            },
+                        },
+                        false,
+                    ),
+                };
+                if reusable {
+                    (index, server, Some(client), dispatch, elapsed_ms)
+                } else {
+                    let _ = timeout(Duration::from_secs(1), client.close()).await;
+                    (index, server, None, dispatch, elapsed_ms)
+                }
+            });
+            task_indexes.insert(task.id(), index);
+        }
+        let mut outcomes = vec![None; calls.len()];
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((index, server, client, dispatch, _elapsed_ms)) => {
+                    if let Some(client) = client {
+                        self.mcp_clients.insert(server, client);
+                    }
+                    outcomes[index] = Some(dispatch);
+                }
+                Err(error) => {
+                    if let Some(index) = task_indexes.get(&error.id()).copied() {
+                        outcomes[index] = Some(ToolDispatch::Failed {
+                            error: "Parallel MCP task terminated before returning a response"
+                                .into(),
+                            elapsed_ms: 0,
+                        });
+                    } else {
+                        for outcome in outcomes.iter_mut().filter(|outcome| outcome.is_none()) {
+                            *outcome = Some(ToolDispatch::Failed {
+                                error: "Parallel MCP task ended without an observed response"
+                                    .into(),
+                                elapsed_ms: 0,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        ParallelBatch::Complete(
+            outcomes
+                .into_iter()
+                .map(|outcome| {
+                    outcome.unwrap_or_else(|| ToolDispatch::Failed {
+                        error: "Parallel MCP task ended without an observed response".into(),
+                        elapsed_ms: 0,
+                    })
+                })
+                .collect(),
+        )
     }
 
     /// Dispatches a namespaced tool execution to the appropriate MCP server.
@@ -1038,6 +1458,7 @@ impl<P: LlmProvider> DustCore<P> {
                         summary_tokens: None,
                         summary_token_source: None,
                         provider_usage: None,
+                        provider_diagnostics: None,
                         max_summary_tokens: compact_config.max_summary_tokens,
                         max_summary_bytes: compact_config.max_summary_bytes,
                         tool_call_count: 0,
@@ -1090,6 +1511,8 @@ impl<P: LlmProvider> DustCore<P> {
                     Ok(Ok(completion)) => completion,
                     Ok(Err(error)) => {
                         report.error = Some(format!("Compaction failed: {error}"));
+                        report.compaction_attempts[attempt_index].provider_diagnostics =
+                            error.provider_diagnostics().cloned();
                         note_compact!(ProviderError);
                         stop!(report, &messages);
                     }
@@ -1106,6 +1529,8 @@ impl<P: LlmProvider> DustCore<P> {
                 };
                 let response = completion.response;
                 let provider_usage = completion.usage;
+                report.compaction_attempts[attempt_index].provider_diagnostics =
+                    completion.diagnostics.clone();
                 let summary = response.content.as_deref().unwrap_or("");
                 let tool_call_count = response.tool_calls.as_ref().map_or(0, Vec::len);
                 let reported_output_tokens = provider_usage.as_ref().and_then(|usage| {
@@ -1347,6 +1772,7 @@ impl<P: LlmProvider> DustCore<P> {
                 error: None,
                 truncated: false,
                 provider_usage: None,
+                provider_diagnostics: None,
             };
             let mut retry_index = 0;
             let completion = loop {
@@ -1394,11 +1820,13 @@ impl<P: LlmProvider> DustCore<P> {
                             error: err.to_string(),
                             delay_ms: wait_started.elapsed().as_millis().min(u64::MAX as u128)
                                 as u64,
+                            diagnostics: err.provider_diagnostics().cloned(),
                         });
                         if waiting.is_err() {
                             turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
                             turn_record.error =
                                 Some("Budget exhausted during provider retry delay".into());
+                            turn_record.provider_diagnostics = err.provider_diagnostics().cloned();
                             report.turns.push(turn_record);
                             report.stop_reason = if matches!(waiting, Err(WaitError::Cancelled)) {
                                 StopReason::Cancelled
@@ -1412,6 +1840,7 @@ impl<P: LlmProvider> DustCore<P> {
                     Ok(Err(err)) => {
                         turn_record.elapsed_ms = provider_start.elapsed().as_millis() as u64;
                         turn_record.error = Some(err.to_string());
+                        turn_record.provider_diagnostics = err.provider_diagnostics().cloned();
                         report.turns.push(turn_record);
                         report.error = Some(err.to_string());
                         stop!(report, &messages);
@@ -1433,6 +1862,7 @@ impl<P: LlmProvider> DustCore<P> {
                 }
             };
             turn_record.provider_usage = completion.usage;
+            turn_record.provider_diagnostics = completion.diagnostics;
             let resp = completion.response;
             if let Err(error) = self.archive_message(&ChatMessage::assistant(
                 resp.content.clone(),
@@ -1594,116 +2024,194 @@ impl<P: LlmProvider> DustCore<P> {
             }
             phase = CheckpointPhase::ToolInFlight;
             messages.push(ChatMessage::assistant(resp.content, Some(calls.clone())));
-            for tc in calls {
-                if Instant::now() >= deadline {
+            let parallel_start = report.tool_calls.len();
+            let parallel_dispatches = match self
+                .execute_parallel_safe_batch(
+                    &calls,
+                    turn,
+                    deadline,
+                    &mut report,
+                    ExecutionCheckpointContext {
+                        user_input,
+                        messages: &messages,
+                        started,
+                        prior_ms,
+                    },
+                )
+                .await
+            {
+                ParallelBatch::NotEligible => None,
+                ParallelBatch::PersistenceFailed => stop!(report, &messages),
+                ParallelBatch::Complete(outcomes) => Some(outcomes),
+            };
+            let mut parallel_blocked = false;
+            let mut parallel_timed_out = false;
+            for (call_index, tc) in calls.iter().enumerate() {
+                if parallel_dispatches.is_none() && Instant::now() >= deadline {
                     report.stop_reason = StopReason::TimeLimit;
                     report.error = Some("Budget exhausted before next tool call".into());
                     stop!(report, &messages);
                 }
                 let call_start = Instant::now();
-                let mut record = ToolRecord {
-                    turn,
-                    call_id: tc.id.clone(),
-                    name: tc.function_name.clone(),
-                    arguments: Value::Null,
-                    status: ToolStatus::Succeeded,
-                    elapsed_ms: 0,
-                    output: None,
-                    error: None,
-                    truncated: false,
-                };
-                let args: Value = match tc.parse_arguments() {
-                    Ok(args) => args,
-                    Err(err) => {
-                        record.status = ToolStatus::InvalidArguments;
-                        record.error = Some(err.to_string());
-                        let error_message = ChatMessage::tool(
-                            &tc.id,
-                            serde_json::json!({"error": err.to_string()}).to_string(),
-                        );
-                        if let Err(error) = self.archive_message(&error_message) {
-                            phase = CheckpointPhase::Blocked;
-                            report.error = Some(format!(
-                                "Invalid argument result could not be archived: {error}"
+                let parallel_record_index = parallel_dispatches
+                    .as_ref()
+                    .map(|_| parallel_start + call_index);
+                let mut record = parallel_record_index
+                    .and_then(|index| report.tool_calls.get(index).cloned())
+                    .unwrap_or_else(|| ToolRecord {
+                        turn,
+                        call_id: tc.id.clone(),
+                        name: tc.function_name.clone(),
+                        arguments: Value::Null,
+                        effect: self.tool_effect(&tc.function_name),
+                        operation_id: None,
+                        status: ToolStatus::Succeeded,
+                        elapsed_ms: 0,
+                        output: None,
+                        error: None,
+                        truncated: false,
+                    });
+                let args: Value = if parallel_dispatches.is_some() {
+                    record.arguments.clone()
+                } else {
+                    match tc.parse_arguments() {
+                        Ok(args) => args,
+                        Err(err) => {
+                            record.status = ToolStatus::InvalidArguments;
+                            record.error = Some(err.to_string());
+                            let error_message = ChatMessage::tool(
+                                &tc.id,
+                                serde_json::json!({"error": err.to_string()}).to_string(),
+                            );
+                            if let Err(error) = self.archive_message(&error_message) {
+                                phase = CheckpointPhase::Blocked;
+                                report.error = Some(format!(
+                                    "Invalid argument result could not be archived: {error}"
+                                ));
+                                stop!(report, &messages);
+                            }
+                            messages.push(error_message);
+                            report.warnings.push(format!(
+                                "Tool {} received invalid arguments",
+                                tc.function_name
                             ));
-                            stop!(report, &messages);
+                            self.emit(super::events::ExecutionEvent::ToolStarted {
+                                call_id: tc.id.clone(),
+                                name: tc.function_name.clone(),
+                                arguments: Value::String(tc.arguments.clone()),
+                            });
+                            self.emit(super::events::ExecutionEvent::ToolFinished {
+                                record: record.clone(),
+                            });
+                            report.tool_calls.push(record);
+                            continue;
                         }
-                        messages.push(error_message);
-                        report.warnings.push(format!(
-                            "Tool {} received invalid arguments",
-                            tc.function_name
-                        ));
+                    }
+                };
+                let call_was_dispatched = parallel_dispatches.is_some()
+                    || tc
+                        .function_name
+                        .split_once("__")
+                        .is_some_and(|(server, _)| {
+                            server != "dustagent" && self.mcp_clients.contains_key(server)
+                        });
+                let dispatch = match parallel_dispatches.as_ref() {
+                    Some(outcomes) => outcomes[call_index].clone(),
+                    None => {
+                        let (prepared_args, effect, operation_id) = match self
+                            .prepare_tool_arguments(&tc.function_name, args)
+                        {
+                            Ok(prepared) => prepared,
+                            Err(error) => {
+                                record.status = ToolStatus::InvalidArguments;
+                                record.error = Some(error.to_string());
+                                let error_message = ChatMessage::tool(
+                                    &tc.id,
+                                    serde_json::json!({"error": error.to_string()}).to_string(),
+                                );
+                                if let Err(archive_error) = self.archive_message(&error_message) {
+                                    phase = CheckpointPhase::Blocked;
+                                    report.error = Some(format!(
+                                        "Invalid argument result could not be archived: {archive_error}"
+                                    ));
+                                    stop!(report, &messages);
+                                }
+                                messages.push(error_message);
+                                self.emit(super::events::ExecutionEvent::ToolStarted {
+                                    call_id: tc.id.clone(),
+                                    name: tc.function_name.clone(),
+                                    arguments: Value::String(tc.arguments.clone()),
+                                });
+                                self.emit(super::events::ExecutionEvent::ToolFinished {
+                                    record: record.clone(),
+                                });
+                                report.tool_calls.push(record);
+                                continue;
+                            }
+                        };
+                        record.arguments = prepared_args;
+                        record.effect = effect;
+                        record.operation_id = operation_id;
+                        record.status = ToolStatus::InFlight;
+                        report.tool_calls.push(record.clone());
+                        if !self.persist(
+                            user_input,
+                            &messages,
+                            &mut report,
+                            phase,
+                            started,
+                            prior_ms,
+                        ) {
+                            return finish_with_prior(report, started, prior_ms);
+                        }
                         self.emit(super::events::ExecutionEvent::ToolStarted {
                             call_id: tc.id.clone(),
                             name: tc.function_name.clone(),
-                            arguments: Value::String(tc.arguments.clone()),
+                            arguments: record.arguments.clone(),
                         });
-                        self.emit(super::events::ExecutionEvent::ToolFinished {
-                            record: record.clone(),
-                        });
-                        report.tool_calls.push(record);
-                        continue;
-                    }
-                };
-                record.arguments = args.clone();
-                let tool_deadline =
-                    (call_start + Duration::from_millis(self.tool_timeout_ms)).min(deadline);
-                if !self.persist(user_input, &messages, &mut report, phase, started, prior_ms) {
-                    return finish_with_prior(report, started, prior_ms);
-                }
-                self.emit(super::events::ExecutionEvent::ToolStarted {
-                    call_id: tc.id.clone(),
-                    name: tc.function_name.clone(),
-                    arguments: args.clone(),
-                });
-                let output = match wait_until(
-                    tool_deadline,
-                    self.cancellation.clone(),
-                    self.execute_tool(&tc.function_name, args),
-                )
-                .await
-                {
-                    Ok(Ok(output)) => {
-                        if serde_json::from_str::<Value>(&output)
-                            .ok()
-                            .and_then(|v| v.get("isError").and_then(Value::as_bool))
-                            == Some(true)
+                        let tool_deadline = (call_start
+                            + Duration::from_millis(self.tool_timeout_ms))
+                        .min(deadline);
+                        match wait_until(
+                            tool_deadline,
+                            self.cancellation.clone(),
+                            self.execute_tool(&tc.function_name, record.arguments.clone()),
+                        )
+                        .await
                         {
-                            record.status = ToolStatus::Failed;
-                            record.error = Some("MCP tool reported isError".into());
+                            Ok(Ok(output)) => ToolDispatch::Observed {
+                                output,
+                                elapsed_ms: call_start.elapsed().as_millis().min(u64::MAX as u128)
+                                    as u64,
+                            },
+                            Ok(Err(error)) => ToolDispatch::Failed {
+                                error: error.to_string(),
+                                elapsed_ms: call_start.elapsed().as_millis().min(u64::MAX as u128)
+                                    as u64,
+                            },
+                            Err(WaitError::Cancelled) => ToolDispatch::Cancelled {
+                                elapsed_ms: call_start.elapsed().as_millis().min(u64::MAX as u128)
+                                    as u64,
+                            },
+                            Err(WaitError::Deadline) => ToolDispatch::TimedOut {
+                                elapsed_ms: call_start.elapsed().as_millis().min(u64::MAX as u128)
+                                    as u64,
+                                stop_reason: if tool_deadline == deadline {
+                                    StopReason::TimeLimit
+                                } else {
+                                    StopReason::ToolTimeout
+                                },
+                            },
                         }
-                        Some(output)
-                    }
-                    Ok(Err(err)) => {
-                        record.status = ToolStatus::Failed;
-                        record.error = Some(err.to_string());
-                        None
-                    }
-                    Err(WaitError::Cancelled) => {
-                        record.status = ToolStatus::TimedOut;
-                        record.error = Some("Tool cancelled; remote outcome is unknown".into());
-                        report.stop_reason = StopReason::Cancelled;
-                        None
-                    }
-                    Err(_) => {
-                        record.status = ToolStatus::TimedOut;
-                        record.error = Some("Tool deadline exceeded".into());
-                        report.stop_reason = if tool_deadline == deadline {
-                            StopReason::TimeLimit
-                        } else {
-                            StopReason::ToolTimeout
-                        };
-                        None
                     }
                 };
-                record.elapsed_ms = call_start.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                let output = self.apply_tool_dispatch(&mut record, dispatch, &mut report);
                 if let Some(output) = output {
                     if let Err(error) = self.archive_message(&ChatMessage::tool(&tc.id, &output)) {
                         phase = CheckpointPhase::Blocked;
                         report.error = Some(format!(
                             "Original tool result could not be archived: {error}"
                         ));
-                        report.tool_calls.push(record);
                         stop!(report, &messages);
                     }
                     let history_read = matches!(
@@ -1751,14 +2259,29 @@ impl<P: LlmProvider> DustCore<P> {
                     if let Err(error) = self.archive_message(&error_message) {
                         phase = CheckpointPhase::Blocked;
                         report.error = Some(format!("Tool error could not be archived: {error}"));
-                        report.tool_calls.push(record);
                         stop!(report, &messages);
                     }
                     messages.push(error_message);
                 }
-                let unknown_outcome = (self.checkpoint_path.is_some() || self.session_mode)
+                let record_index = parallel_record_index.unwrap_or_else(|| {
+                    report
+                        .tool_calls
+                        .iter()
+                        .rposition(|existing| existing.call_id == record.call_id)
+                        .expect("serial tool record is persisted before dispatch")
+                });
+                let output_observed = matches!(
+                    record.status,
+                    ToolStatus::Succeeded | ToolStatus::Reconciled
+                ) || (record.status == ToolStatus::Failed
+                    && record.output.is_some());
+                let unknown_outcome = call_was_dispatched
                     && record.status == ToolStatus::Failed
-                    && record.output.is_none();
+                    && !output_observed
+                    && matches!(
+                        record.effect,
+                        ToolEffect::ExternalUnknown | ToolEffect::Idempotent
+                    );
                 let timed_out = record.status == ToolStatus::TimedOut;
                 if record.status != ToolStatus::Succeeded {
                     report
@@ -1768,37 +2291,94 @@ impl<P: LlmProvider> DustCore<P> {
                 self.emit(super::events::ExecutionEvent::ToolFinished {
                     record: record.clone(),
                 });
-                report.tool_calls.push(record);
+                report.tool_calls[record_index] = record.clone();
                 if unknown_outcome {
                     phase = CheckpointPhase::Blocked;
                     report.stop_reason = StopReason::ExecutionError;
-                    report.error = report
-                        .tool_calls
-                        .last()
-                        .and_then(|record| record.error.clone());
-                    report.warnings.push(format!("Tool {} failed without an observed response; its remote outcome is unknown. Checkpoint resume and session continuation are blocked.", tc.function_name));
-                    if let Some((server, _)) = tc.function_name.split_once("__")
-                        && let Some(mut client) = self.mcp_clients.remove(server)
-                    {
-                        let _ = timeout(Duration::from_secs(1), client.close()).await;
+                    report.error = record.error.clone();
+                    let recovery_hint = if self.checkpoint_path.is_some() {
+                        "After checking the external system, supply its observed result with `dust reconcile`."
+                    } else {
+                        "No checkpoint is available for reconciliation."
+                    };
+                    report.warnings.push(format!(
+                        "Tool {} failed without an observed response; its remote outcome is unknown. {recovery_hint}",
+                        tc.function_name
+                    ));
+                    if parallel_dispatches.is_some() {
+                        parallel_blocked = true;
+                    } else {
+                        if let Err(error) = self.record_not_dispatched(
+                            &calls,
+                            call_index + 1,
+                            turn,
+                            &mut messages,
+                            &mut report,
+                        ) {
+                            report.error = Some(format!(
+                                "Could not record calls that were not dispatched: {error}"
+                            ));
+                        }
+                        if let Some((server, _)) = tc.function_name.split_once("__")
+                            && let Some(mut client) = self.mcp_clients.remove(server)
+                        {
+                            let _ = timeout(Duration::from_secs(1), client.close()).await;
+                        }
+                        stop!(report, &messages);
                     }
-                    stop!(report, &messages);
                 }
                 if timed_out {
-                    let interruption = if report.stop_reason == StopReason::Cancelled {
+                    let interruption = if record
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("cancelled"))
+                    {
                         "was cancelled"
                     } else {
                         "timed out"
                     };
                     report.warnings.push(format!("Tool {} {interruption}; its remote outcome is unknown. No automatic retry was attempted.", tc.function_name));
-                    // A cancelled stdio request can leave unread responses; discard the client.
-                    if let Some((server, _)) = tc.function_name.split_once("__")
-                        && let Some(mut client) = self.mcp_clients.remove(server)
-                    {
-                        let _ = timeout(Duration::from_secs(1), client.close()).await;
+                    if parallel_dispatches.is_some() {
+                        parallel_timed_out = true;
+                    } else {
+                        if let Err(error) = self.record_not_dispatched(
+                            &calls,
+                            call_index + 1,
+                            turn,
+                            &mut messages,
+                            &mut report,
+                        ) {
+                            report.error = Some(format!(
+                                "Could not record calls that were not dispatched: {error}"
+                            ));
+                        }
+                        if let Some((server, _)) = tc.function_name.split_once("__")
+                            && let Some(mut client) = self.mcp_clients.remove(server)
+                        {
+                            let _ = timeout(Duration::from_secs(1), client.close()).await;
+                        }
+                        stop!(report, &messages);
                     }
-                    stop!(report, &messages);
                 }
+                if parallel_dispatches.is_some()
+                    && !self.persist(
+                        user_input,
+                        &messages,
+                        &mut report,
+                        CheckpointPhase::ToolInFlight,
+                        started,
+                        prior_ms,
+                    )
+                {
+                    return finish_with_prior(report, started, prior_ms);
+                }
+            }
+            if parallel_blocked || parallel_timed_out {
+                if parallel_timed_out && report.stop_reason == StopReason::ExecutionError {
+                    report.stop_reason = StopReason::ToolTimeout;
+                }
+                phase = CheckpointPhase::Blocked;
+                stop!(report, &messages);
             }
             phase = CheckpointPhase::Ready;
             if !self.persist(user_input, &messages, &mut report, phase, started, prior_ms) {

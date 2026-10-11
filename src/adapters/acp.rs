@@ -510,6 +510,8 @@ mod tests {
             call_id: "reused".into(),
             name: "tool".into(),
             arguments: json!({}),
+            effect: crate::ToolEffect::ExternalUnknown,
+            operation_id: None,
             status: ToolStatus::Succeeded,
             elapsed_ms: 0,
             output: Some("ok".into()),

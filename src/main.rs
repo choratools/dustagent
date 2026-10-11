@@ -71,6 +71,9 @@ enum Commands {
 
     /// Automatically review recorded examples and improve future runs
     Learn(LearnArgs),
+
+    /// Attach an operator-observed result to an interrupted tool call without replaying it
+    Reconcile(ReconcileArgs),
 }
 
 #[derive(Args, Debug)]
@@ -124,6 +127,18 @@ struct LearnArgs {
     model: Option<String>,
     #[arg(long)]
     experience_dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct ReconcileArgs {
+    /// Interrupted checkpoint to update
+    checkpoint: PathBuf,
+    /// ID of the next uncertain tool call in the checkpoint
+    #[arg(long)]
+    call_id: String,
+    /// File containing the result observed in the external system (maximum 1 MiB)
+    #[arg(long)]
+    result_file: PathBuf,
 }
 
 #[derive(Args, Debug)]
@@ -307,6 +322,13 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Commands::Reconcile(args) => match handle_reconcile(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("Error: {err}");
+                ExitCode::FAILURE
+            }
+        },
         Commands::Run(args) => match handle_run(args).await {
             Ok(code) => ExitCode::from(code),
             Err(err) => {
@@ -329,6 +351,50 @@ async fn main() -> ExitCode {
             }
         },
     }
+}
+
+fn handle_reconcile(args: ReconcileArgs) -> anyhow::Result<()> {
+    const MAX_RESULT_BYTES: u64 = 1024 * 1024;
+    if std::fs::symlink_metadata(&args.checkpoint)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        anyhow::bail!("Checkpoint path must not be a symlink");
+    }
+    let (checkpoint_path, _lease) = acquire_checkpoint_lease(&args.checkpoint)?;
+    let checkpoint_meta = std::fs::symlink_metadata(&checkpoint_path)?;
+    if checkpoint_meta.file_type().is_symlink() || !checkpoint_meta.is_file() {
+        anyhow::bail!("Checkpoint must be a regular file, not a symlink");
+    }
+
+    let result_meta = std::fs::symlink_metadata(&args.result_file)?;
+    if result_meta.file_type().is_symlink() || !result_meta.is_file() {
+        anyhow::bail!("Result file must be a regular file, not a symlink");
+    }
+    if args.result_file.canonicalize()? == checkpoint_path {
+        anyhow::bail!("Result file must not be the checkpoint itself");
+    }
+    if result_meta.len() > MAX_RESULT_BYTES {
+        anyhow::bail!("Reconciled result file exceeds 1 MiB");
+    }
+    let mut result = Vec::with_capacity(result_meta.len() as usize);
+    std::fs::File::open(&args.result_file)?
+        .take(MAX_RESULT_BYTES + 1)
+        .read_to_end(&mut result)?;
+    if result.len() as u64 > MAX_RESULT_BYTES {
+        anyhow::bail!("Reconciled result file exceeds 1 MiB");
+    }
+    let result = String::from_utf8(result)
+        .map_err(|_| anyhow::anyhow!("Reconciled result file must contain UTF-8 text"))?;
+
+    let mut checkpoint = dustagent::application::checkpoint::load(&checkpoint_path)?;
+    checkpoint.reconcile_tool_result(&args.call_id, &result)?;
+    let phase = checkpoint.phase;
+    dustagent::application::checkpoint::save(&checkpoint_path, &checkpoint)?;
+    println!(
+        "Reconciled tool call '{}'; checkpoint is {:?}. No MCP tool was executed.",
+        args.call_id, phase
+    );
+    Ok(())
 }
 
 fn artifact_exit(result: dustagent::Result<PathBuf>) -> ExitCode {

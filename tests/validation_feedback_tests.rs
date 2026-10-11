@@ -41,6 +41,8 @@ async fn feedback_receives_actual_tools_and_state() {
         call_id: "c1".into(),
         name: "fetch".into(),
         arguments: serde_json::json!({}),
+        effect: dustagent::ToolEffect::ExternalUnknown,
+        operation_id: None,
         status: ToolStatus::Succeeded,
         elapsed_ms: 0,
         output: Some("observed".into()),

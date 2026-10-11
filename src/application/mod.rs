@@ -13,7 +13,7 @@ pub mod research;
 
 pub mod execution;
 pub use execution::{
-    ExecutionReport, StopReason, TokenUsageSummary, ToolRecord, ToolStatus, TurnRecord,
+    ExecutionReport, StopReason, TokenUsageSummary, ToolEffect, ToolRecord, ToolStatus, TurnRecord,
 };
 
 pub mod checkpoint;

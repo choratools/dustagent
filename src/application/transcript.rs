@@ -68,6 +68,11 @@ fn root() -> Result<PathBuf> {
             DustError::Config("Set HOME or DUST_HISTORY_HOME to preserve transcripts".into())
         })
 }
+
+pub(super) fn configured_root() -> Result<PathBuf> {
+    root()
+}
+
 fn hash(previous: &str, line: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(previous.as_bytes());

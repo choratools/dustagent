@@ -1,5 +1,5 @@
 use crate::application::retry::parse_retry_after;
-use crate::error::ProviderFailure;
+use crate::error::{ProviderDiagnostics, ProviderFailure};
 use crate::ports::llm::{
     ChatMessage, LlmCompletion, LlmProvider, LlmResponse, LlmUsage, ToolCall, ToolDefinition,
 };
@@ -200,6 +200,7 @@ impl LlmProvider for OpenAiProvider {
             })?;
 
         let status = resp.status();
+        let diagnostics = provider_diagnostics(status.as_u16(), resp.headers(), None);
         if !status.is_success() {
             // Status is decisive; do not expose arbitrary server bodies or credentials.
             let kind = match status.as_u16() {
@@ -212,38 +213,50 @@ impl LlmProvider for OpenAiProvider {
                 .and_then(|value| value.to_str().ok())
                 .and_then(parse_retry_after);
             if kind == ProviderFailure::Transient && retry_after.is_some() {
-                return Err(DustError::ProviderRetryable {
+                return Err(DustError::ProviderRetryableWithDiagnostics {
                     kind,
                     message: format!("OpenAI API error ({status})"),
                     retry_after,
+                    diagnostics: provider_diagnostics(status.as_u16(), resp.headers(), retry_after),
                 });
             }
-            return Err(DustError::Provider {
+            return Err(DustError::ProviderWithDiagnostics {
                 kind,
                 message: format!("OpenAI API error ({status})"),
+                diagnostics,
             });
         }
-        let bytes = resp.bytes().await.map_err(|e| DustError::Provider {
-            kind: ProviderFailure::Transient,
-            message: format!("Failed to read OpenAI response body: {}", e.without_url()),
-        })?;
-        let resp_json: Value = serde_json::from_slice(&bytes).map_err(|e| DustError::Provider {
-            kind: ProviderFailure::InvalidResponse,
-            message: format!("Failed to parse OpenAI JSON response: {e}"),
-        })?;
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| DustError::ProviderWithDiagnostics {
+                kind: ProviderFailure::Transient,
+                message: format!("Failed to read OpenAI response body: {}", e.without_url()),
+                diagnostics: diagnostics.clone(),
+            })?;
+        let resp_json: Value =
+            serde_json::from_slice(&bytes).map_err(|e| DustError::ProviderWithDiagnostics {
+                kind: ProviderFailure::InvalidResponse,
+                message: format!("Failed to parse OpenAI JSON response: {e}"),
+                diagnostics: diagnostics.clone(),
+            })?;
 
         let choice = resp_json
             .get("choices")
             .and_then(|c| c.get(0))
-            .ok_or_else(|| DustError::Provider {
+            .ok_or_else(|| DustError::ProviderWithDiagnostics {
                 kind: ProviderFailure::InvalidResponse,
                 message: "OpenAI response missing 'choices[0]'".into(),
+                diagnostics: diagnostics.clone(),
             })?;
 
-        let message = choice.get("message").ok_or_else(|| DustError::Provider {
-            kind: ProviderFailure::InvalidResponse,
-            message: "OpenAI choice missing 'message'".into(),
-        })?;
+        let message = choice
+            .get("message")
+            .ok_or_else(|| DustError::ProviderWithDiagnostics {
+                kind: ProviderFailure::InvalidResponse,
+                message: "OpenAI choice missing 'message'".into(),
+                diagnostics: diagnostics.clone(),
+            })?;
 
         let content = message
             .get("content")
@@ -284,8 +297,50 @@ impl LlmProvider for OpenAiProvider {
                 tool_calls,
             },
             usage,
+            diagnostics: Some(diagnostics),
         })
     }
+}
+
+fn provider_diagnostics(
+    status_code: u16,
+    headers: &reqwest::header::HeaderMap,
+    retry_after: Option<std::time::Duration>,
+) -> ProviderDiagnostics {
+    ProviderDiagnostics {
+        status_code: Some(status_code),
+        request_id: first_safe_header(
+            headers,
+            &["x-request-id", "request-id", "openai-request-id"],
+        ),
+        trace_id: first_safe_header(headers, &["traceparent", "x-trace-id"]),
+        retry_after_ms: retry_after.map(duration_ms),
+        stream_terminal: None,
+    }
+}
+
+fn first_safe_header(headers: &reqwest::header::HeaderMap, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(safe_identifier)
+    })
+}
+
+fn safe_identifier(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 256 {
+        return None;
+    }
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '='))
+        .then(|| value.to_owned())
+}
+
+fn duration_ms(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn parse_usage(value: Option<&Value>) -> Option<LlmUsage> {
@@ -312,6 +367,21 @@ fn parse_usage(value: Option<&Value>) -> Option<LlmUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostics_allowlist_safe_headers_only() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-request-id", "req_safe-123".parse().unwrap());
+        headers.insert("traceparent", "https://example.test/trace".parse().unwrap());
+        headers.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
+
+        let diagnostics = provider_diagnostics(429, &headers, parse_retry_after("2"));
+
+        assert_eq!(diagnostics.status_code, Some(429));
+        assert_eq!(diagnostics.request_id.as_deref(), Some("req_safe-123"));
+        assert_eq!(diagnostics.trace_id, None);
+        assert_eq!(diagnostics.retry_after_ms, Some(2_000));
+    }
 
     #[test]
     fn test_openai_provider_config() {

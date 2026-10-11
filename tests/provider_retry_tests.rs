@@ -41,7 +41,7 @@ fn server_with_retry_after(
         let retry_header = retry_after
             .map(|value| format!("Retry-After: {value}\r\n"))
             .unwrap_or_default();
-        write!(stream,"HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{retry_header}Connection: close\r\n\r\n{body}",length.unwrap_or(body.len())).unwrap();
+        write!(stream,"HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Request-Id: request-test-123\r\n{retry_header}Connection: close\r\n\r\n{body}",length.unwrap_or(body.len())).unwrap();
     });
     format!("http://{addr}/v1")
 }
@@ -59,11 +59,14 @@ async fn adapter_preserves_retry_after_for_transient_status() {
     assert!(error.is_retryable_provider_failure());
     assert!(matches!(
         error,
-        DustError::ProviderRetryable {
+        DustError::ProviderRetryableWithDiagnostics {
             kind: ProviderFailure::Transient,
             retry_after: Some(delay),
+            diagnostics,
             ..
         } if delay == std::time::Duration::from_secs(3)
+            && diagnostics.retry_after_ms == Some(3000)
+            && diagnostics.request_id.as_deref() == Some("request-test-123")
     ));
 }
 #[tokio::test]
@@ -93,10 +96,22 @@ async fn adapter_distinguishes_status_invalid_json_and_interrupted_body() {
             .chat(&[ChatMessage::user("input")], None)
             .await
             .unwrap_err();
-        assert!(
-            matches!(&error,DustError::Provider {kind:observed,..} if *observed==kind),
-            "{error}"
-        );
+        match &error {
+            DustError::Provider { kind: observed, .. }
+            | DustError::ProviderWithDiagnostics { kind: observed, .. } => {
+                assert_eq!(*observed, kind, "{error}");
+            }
+            DustError::ProviderRetryableWithDiagnostics { kind: observed, .. } => {
+                assert_eq!(*observed, kind, "{error}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        if let DustError::ProviderWithDiagnostics { diagnostics, .. }
+        | DustError::ProviderRetryableWithDiagnostics { diagnostics, .. } = &error
+        {
+            assert_eq!(diagnostics.status_code, Some(status));
+            assert_eq!(diagnostics.request_id.as_deref(), Some("request-test-123"));
+        }
         assert_eq!(
             error.is_retryable_provider_failure(),
             kind == ProviderFailure::Transient

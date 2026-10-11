@@ -3,7 +3,7 @@ use dustagent::application::checkpoint;
 use dustagent::ports::mcp::{McpClient, McpTool};
 use dustagent::{
     AppManifest, ChatMessage, CheckpointPhase, DustCore, LlmProvider, LlmResponse, StopReason,
-    ToolCall, ToolDefinition,
+    ToolCall, ToolDefinition, ToolStatus,
 };
 use serde_json::{Value, json};
 use std::collections::VecDeque;
@@ -139,21 +139,38 @@ async fn unknown_tool_outcome_blocks_restart() {
     let path = directory.path().join("state.json");
     let manifest = AppManifest::new();
     let count = Arc::new(AtomicUsize::new(0));
-    let mut first = DustCore::new(manifest.clone(), Provider::new(vec![Ok(observe())]))
-        .with_checkpoint(&path)
-        .with_mcp_client(
-            "source",
-            Box::new(CounterTool {
-                count: count.clone(),
-                fail: true,
-            }),
-        );
+    let mut first = DustCore::new(
+        manifest.clone(),
+        Provider::new(vec![Ok(LlmResponse::tool_calls(vec![
+            ToolCall::new("call1", "source__observe", "{}"),
+            ToolCall::new("call2", "source__observe", "{}"),
+        ]))]),
+    )
+    .with_checkpoint(&path)
+    .with_mcp_client(
+        "source",
+        Box::new(CounterTool {
+            count: count.clone(),
+            fail: true,
+        }),
+    );
     assert_eq!(
         first.execute_report("input").await.stop_reason,
         StopReason::ExecutionError
     );
     let saved = checkpoint::load(&path).unwrap();
     assert_eq!(saved.phase, CheckpointPhase::Blocked);
+    assert_eq!(saved.report.tool_calls.len(), 2);
+    assert_eq!(saved.report.tool_calls[0].status, ToolStatus::Failed);
+    assert_eq!(saved.report.tool_calls[1].status, ToolStatus::NotExecuted);
+    assert_eq!(
+        saved
+            .messages
+            .iter()
+            .filter(|message| message.role == "tool")
+            .count(),
+        2
+    );
     let provider = Provider::new(vec![]);
     let calls = provider.calls.clone();
     let mut resumed = DustCore::new(manifest, provider).with_checkpoint(&path);
@@ -163,6 +180,17 @@ async fn unknown_tool_outcome_blocks_restart() {
     );
     assert!(calls.lock().unwrap().is_empty());
     assert_eq!(count.load(Ordering::SeqCst), 1);
+
+    let mut reconciled = saved;
+    reconciled
+        .reconcile_tool_result("call1", "externally verified result")
+        .unwrap();
+    assert_eq!(reconciled.phase, CheckpointPhase::Ready);
+    assert_eq!(
+        reconciled.report.tool_calls[1].status,
+        ToolStatus::NotExecuted
+    );
+    reconciled.ensure_resumable().unwrap();
 }
 #[tokio::test]
 async fn save_failure_before_dispatch_prevents_effect() {

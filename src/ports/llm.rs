@@ -1,3 +1,4 @@
+use crate::error::ProviderDiagnostics;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -168,6 +169,7 @@ impl LlmUsage {
 pub struct LlmCompletion {
     pub response: LlmResponse,
     pub usage: Option<LlmUsage>,
+    pub diagnostics: Option<ProviderDiagnostics>,
 }
 
 impl LlmResponse {
@@ -230,6 +232,7 @@ pub trait LlmProvider: Send + Sync {
             .map(|response| LlmCompletion {
                 response,
                 usage: None,
+                diagnostics: None,
             })
     }
 }

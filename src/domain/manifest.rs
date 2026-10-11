@@ -19,6 +19,16 @@ pub struct McpServerConfig {
     /// Opt-in Linux filesystem jail for this server only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chroot: Option<McpChrootConfig>,
+    /// Tool names whose app owner has verified read-only behavior.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only_tools: Vec<String>,
+    /// Tool names whose server contract is idempotent for the same operation key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub idempotent_tools: Vec<String>,
+    /// Optional string argument to which DustAgent injects a stable operation ID.
+    /// The MCP server must honor this key to deduplicate repeated requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key_argument: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +47,9 @@ impl McpServerConfig {
             args: Vec::new(),
             env: None,
             chroot: None,
+            read_only_tools: Vec::new(),
+            idempotent_tools: Vec::new(),
+            idempotency_key_argument: None,
         }
     }
 
@@ -104,6 +117,45 @@ impl McpServerConfig {
             })
         }) {
             return Err(DustError::Manifest("MCP chroot env cannot configure the host loader (LD_*, GLIBC_TUNABLES, GCONV_PATH, LOCPATH, NLSPATH)".into()));
+        }
+        Ok(())
+    }
+
+    pub fn validate_tool_effects(&self) -> Result<()> {
+        for tools in [&self.read_only_tools, &self.idempotent_tools] {
+            let mut unique = std::collections::HashSet::new();
+            if tools.iter().any(|tool| {
+                tool.is_empty() || tool.len() > 128 || tool.trim() != tool || !unique.insert(tool)
+            }) {
+                return Err(DustError::Manifest(
+                    "MCP effect tool names must be unique, nonempty, and at most 128 bytes".into(),
+                ));
+            }
+        }
+        if self
+            .read_only_tools
+            .iter()
+            .any(|tool| self.idempotent_tools.contains(tool))
+        {
+            return Err(DustError::Manifest(
+                "An MCP tool cannot be both read_only and idempotent".into(),
+            ));
+        }
+        if self.idempotent_tools.is_empty() != self.idempotency_key_argument.is_none() {
+            return Err(DustError::Manifest(
+                "idempotent_tools and idempotency_key_argument must be configured together".into(),
+            ));
+        }
+        if let Some(name) = &self.idempotency_key_argument
+            && (name.is_empty()
+                || name.len() > 128
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
+        {
+            return Err(DustError::Manifest(
+                "idempotency_key_argument must be an ASCII identifier".into(),
+            ));
         }
         Ok(())
     }
@@ -213,6 +265,7 @@ impl AppManifest {
         manifest.validate_model_configurations()?;
         for config in manifest.mcp_servers.values() {
             config.validate_chroot()?;
+            config.validate_tool_effects()?;
         }
         if let Some(config) = &manifest.compaction {
             config.validate()?;

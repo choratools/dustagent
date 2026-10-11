@@ -87,3 +87,5 @@ graph LR
 - [[19_MCP_chroot]] — stdio MCP별 준비된 파일시스템 루트, 실행 권한과 실패 경계
 
 - [[20_모델별_스킬_로딩]] — 모델별 catalog·preload·selective 입력과 상대 자료 조회
+
+- [[21_도구_효과_진단_및_복구]] — Provider 진단, MCP 병렬 실행 경계, 불확실한 외부 호출 조정

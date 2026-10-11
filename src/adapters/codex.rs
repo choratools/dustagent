@@ -4,7 +4,7 @@
 //! No backend response body or authentication value is included in errors.
 use super::codex_auth::{CodexAuth, Credentials};
 use crate::application::retry::parse_retry_after;
-use crate::error::ProviderFailure;
+use crate::error::{ProviderDiagnostics, ProviderFailure, ProviderStreamTerminal};
 use crate::ports::llm::{
     ChatMessage, LlmCompletion, LlmProvider, LlmResponse, LlmUsage, ToolCall, ToolDefinition,
 };
@@ -67,6 +67,59 @@ fn failure(kind: ProviderFailure, message: &str) -> DustError {
     DustError::Provider {
         kind,
         message: message.into(),
+    }
+}
+
+fn failure_with_diagnostics(
+    kind: ProviderFailure,
+    message: &str,
+    diagnostics: ProviderDiagnostics,
+) -> DustError {
+    DustError::ProviderWithDiagnostics {
+        kind,
+        message: message.into(),
+        diagnostics,
+    }
+}
+
+fn attach_stream_diagnostics(error: DustError, mut diagnostics: ProviderDiagnostics) -> DustError {
+    match error {
+        DustError::Provider { kind, message } => {
+            failure_with_diagnostics(kind, &message, diagnostics)
+        }
+        DustError::ProviderWithDiagnostics {
+            kind,
+            message,
+            diagnostics: parser_diagnostics,
+        } => {
+            diagnostics.stream_terminal = parser_diagnostics.stream_terminal;
+            failure_with_diagnostics(kind, &message, diagnostics)
+        }
+        DustError::ProviderRetryable {
+            kind,
+            message,
+            retry_after,
+        } => DustError::ProviderRetryableWithDiagnostics {
+            kind,
+            message,
+            retry_after,
+            diagnostics,
+        },
+        DustError::ProviderRetryableWithDiagnostics {
+            kind,
+            message,
+            retry_after,
+            diagnostics: parser_diagnostics,
+        } => {
+            diagnostics.stream_terminal = parser_diagnostics.stream_terminal;
+            DustError::ProviderRetryableWithDiagnostics {
+                kind,
+                message,
+                retry_after,
+                diagnostics,
+            }
+        }
+        other => other,
     }
 }
 
@@ -173,6 +226,7 @@ impl LlmProvider for CodexProvider {
             response = self.send(&fresh, &payload).await?;
         }
         let status = response.status();
+        let diagnostics = provider_diagnostics(status.as_u16(), response.headers(), None);
         if !status.is_success() {
             let kind =
                 if status.as_u16() == 408 || status.as_u16() == 429 || status.is_server_error() {
@@ -186,33 +240,104 @@ impl LlmProvider for CodexProvider {
                 .and_then(|value| value.to_str().ok())
                 .and_then(parse_retry_after);
             if kind == ProviderFailure::Transient && retry_after.is_some() {
-                return Err(DustError::ProviderRetryable {
+                return Err(DustError::ProviderRetryableWithDiagnostics {
                     kind,
                     message: format!("Codex API error ({status})"),
                     retry_after,
+                    diagnostics: provider_diagnostics(
+                        status.as_u16(),
+                        response.headers(),
+                        retry_after,
+                    ),
                 });
             }
-            return Err(failure(kind, &format!("Codex API error ({status})")));
+            return Err(failure_with_diagnostics(
+                kind,
+                &format!("Codex API error ({status})"),
+                diagnostics,
+            ));
         }
         let mut parser = SseParser::default();
-        while let Some(chunk) = response.chunk().await.map_err(|_| {
-            failure(
-                ProviderFailure::Transient,
-                "Codex response stream interrupted",
-            )
-        })? {
-            if let Some(result) = parser.push(&chunk)? {
+        loop {
+            let chunk = match response.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(_) => {
+                    let mut diagnostics = diagnostics.clone();
+                    diagnostics.stream_terminal =
+                        Some(ProviderStreamTerminal::EndedBeforeCompletion);
+                    return Err(failure_with_diagnostics(
+                        ProviderFailure::Transient,
+                        "Codex response stream interrupted",
+                        diagnostics,
+                    ));
+                }
+            };
+            let parsed = match parser.push(&chunk) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let mut diagnostics = diagnostics.clone();
+                    diagnostics.stream_terminal =
+                        parser.stream_terminal.or(diagnostics.stream_terminal);
+                    return Err(attach_stream_diagnostics(error, diagnostics));
+                }
+            };
+            if let Some(result) = parsed {
+                let mut diagnostics = diagnostics.clone();
+                diagnostics.stream_terminal = parser.stream_terminal;
                 return Ok(LlmCompletion {
                     response: result,
                     usage: parser.usage.clone(),
+                    diagnostics: Some(diagnostics),
                 });
             }
         }
-        Err(failure(
+        let mut diagnostics = diagnostics;
+        diagnostics.stream_terminal = Some(ProviderStreamTerminal::EndedBeforeCompletion);
+        Err(failure_with_diagnostics(
             ProviderFailure::Transient,
             "Codex stream ended before completion",
+            diagnostics,
         ))
     }
+}
+
+fn provider_diagnostics(
+    status_code: u16,
+    headers: &reqwest::header::HeaderMap,
+    retry_after: Option<std::time::Duration>,
+) -> ProviderDiagnostics {
+    ProviderDiagnostics {
+        status_code: Some(status_code),
+        request_id: first_safe_header(headers, &["x-request-id", "request-id"]),
+        trace_id: first_safe_header(headers, &["traceparent", "x-trace-id"]),
+        retry_after_ms: retry_after.map(duration_ms),
+        stream_terminal: None,
+    }
+}
+
+fn first_safe_header(headers: &reqwest::header::HeaderMap, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(safe_identifier)
+    })
+}
+
+fn safe_identifier(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 256 {
+        return None;
+    }
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '='))
+        .then(|| value.to_owned())
+}
+
+fn duration_ms(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 #[derive(Default)]
@@ -222,6 +347,7 @@ struct SseParser {
     line: Vec<u8>,
     items: Vec<Value>,
     usage: Option<LlmUsage>,
+    stream_terminal: Option<ProviderStreamTerminal>,
 }
 impl SseParser {
     fn push(&mut self, bytes: &[u8]) -> Result<Option<LlmResponse>> {
@@ -280,9 +406,14 @@ impl SseParser {
     }
     fn event(&mut self, data: &[u8]) -> Result<Option<LlmResponse>> {
         if data == b"[DONE]" {
-            return Err(failure(
+            self.stream_terminal = Some(ProviderStreamTerminal::DoneWithoutCompletion);
+            return Err(failure_with_diagnostics(
                 ProviderFailure::Transient,
                 "Codex stream ended before completion",
+                ProviderDiagnostics {
+                    stream_terminal: self.stream_terminal,
+                    ..Default::default()
+                },
             ));
         }
         let event: Value = serde_json::from_slice(data)
@@ -298,6 +429,7 @@ impl SseParser {
                 self.items.push(item.clone());
             }
             Some("response.completed") => {
+                self.stream_terminal = Some(ProviderStreamTerminal::Completed);
                 let response =
                     event
                         .get("response")
@@ -348,10 +480,20 @@ impl SseParser {
                 return Ok(Some(parse_output(items)?));
             }
             Some("response.failed" | "response.incomplete" | "error") => {
+                self.stream_terminal = match event.get("type").and_then(Value::as_str) {
+                    Some("response.failed") => Some(ProviderStreamTerminal::Failed),
+                    Some("response.incomplete") => Some(ProviderStreamTerminal::Incomplete),
+                    Some("error") => Some(ProviderStreamTerminal::Error),
+                    _ => None,
+                };
                 // Backend bodies can contain user inputs and credentials; never echo them.
-                return Err(failure(
+                return Err(failure_with_diagnostics(
                     ProviderFailure::Permanent,
                     "Codex response failed or was incomplete",
+                    ProviderDiagnostics {
+                        stream_terminal: self.stream_terminal,
+                        ..Default::default()
+                    },
                 ));
             }
             Some(_) => {}
@@ -490,7 +632,28 @@ mod tests {
         let result = result.unwrap();
         assert_eq!(result.content.as_deref(), Some("안녕"));
         assert_eq!(result.tool_calls.unwrap()[0].id, "call123");
+        assert_eq!(
+            parser.stream_terminal,
+            Some(ProviderStreamTerminal::Completed)
+        );
     }
+
+    #[test]
+    fn diagnostics_allowlist_safe_headers_only() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-request-id", "req_safe-123".parse().unwrap());
+        headers.insert("x-trace-id", "trace/unsafe".parse().unwrap());
+        headers.insert(reqwest::header::RETRY_AFTER, "1".parse().unwrap());
+
+        let diagnostics = provider_diagnostics(503, &headers, parse_retry_after("1"));
+
+        assert_eq!(diagnostics.status_code, Some(503));
+        assert_eq!(diagnostics.request_id.as_deref(), Some("req_safe-123"));
+        assert_eq!(diagnostics.trace_id, None);
+        assert_eq!(diagnostics.retry_after_ms, Some(1_000));
+        assert_eq!(diagnostics.stream_terminal, None);
+    }
+
     #[test]
     fn completed_output_not_duplicated() {
         let item = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]});
@@ -617,7 +780,7 @@ mod tests {
                 }
                 tx.send(String::from_utf8(request).unwrap()).await.unwrap();
                 let response = format!(
-                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nContent-Type: text/event-stream\r\nX-Request-Id: request-test-123\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
@@ -646,7 +809,7 @@ mod tests {
             model: "test-model".into(),
         };
         let response = provider
-            .chat(
+            .chat_with_usage(
                 &[
                     ChatMessage::system("sys"),
                     ChatMessage::assistant(
@@ -659,7 +822,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.content.as_deref(), Some("done"));
+        assert_eq!(response.response.content.as_deref(), Some("done"));
+        assert_eq!(
+            response.diagnostics.as_ref().unwrap().request_id.as_deref(),
+            Some("request-test-123")
+        );
+        assert_eq!(
+            response.diagnostics.unwrap().stream_terminal,
+            Some(ProviderStreamTerminal::Completed)
+        );
         let request = rx.recv().await.unwrap();
         let (headers, body) = request.split_once("\r\n\r\n").unwrap();
         assert!(
@@ -680,13 +851,27 @@ mod tests {
     }
     #[tokio::test]
     async fn http_status_and_truncated_stream_fail_closed() {
-        for (status, body, expected) in [
-            (429, "secret-body".into(), ProviderFailure::Transient),
-            (403, "secret-body".into(), ProviderFailure::Permanent),
+        for (status, body, expected, terminal) in [
+            (429, "secret-body".into(), ProviderFailure::Transient, None),
+            (403, "secret-body".into(), ProviderFailure::Permanent, None),
             (
                 200,
                 "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n".into(),
                 ProviderFailure::Transient,
+                Some(ProviderStreamTerminal::EndedBeforeCompletion),
+            ),
+            (
+                200,
+                "data: {\"type\":\"response.failed\",\"error\":{\"message\":\"secret-body\"}}\n\n"
+                    .into(),
+                ProviderFailure::Permanent,
+                Some(ProviderStreamTerminal::Failed),
+            ),
+            (
+                200,
+                "data: [DONE]\n\n".into(),
+                ProviderFailure::Transient,
+                Some(ProviderStreamTerminal::DoneWithoutCompletion),
             ),
         ] {
             let (endpoint, _rx, server) = mock_server(vec![(status, body)]).await;
@@ -702,7 +887,18 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(!error.to_string().contains("secret-body"));
-            assert!(matches!(error,DustError::Provider{kind,..} if kind==expected));
+            match error {
+                DustError::ProviderWithDiagnostics {
+                    kind, diagnostics, ..
+                } => {
+                    assert_eq!(kind, expected);
+                    assert_eq!(diagnostics.status_code, Some(status));
+                    assert_eq!(diagnostics.request_id.as_deref(), Some("request-test-123"));
+                    assert_eq!(diagnostics.stream_terminal, terminal);
+                }
+                DustError::Provider { kind, .. } => assert_eq!(kind, expected),
+                other => panic!("unexpected error: {other:?}"),
+            }
             server.await.unwrap();
         }
     }

@@ -113,6 +113,7 @@ DustAgent provides these individual commands. A single command that automaticall
 | `dust pack <SOURCE> [--encrypt] [--passphrase VALUE]` | Pack an application directory; `--encrypt` protects the full archive with a passphrase |
 | `dust install <SOURCE>` | Install a local directory or `.dustpkg` package |
 | `dust learn <APP>` | Investigate and review recorded examples for future reuse |
+| `dust reconcile <CHECKPOINT> --call-id ID --result-file FILE` | Attach an operator-observed result to an uncertain tool call without replaying it |
 | `dust patch --file <FILE> <INSTRUCTION>` | Apply generated SEARCH/REPLACE blocks to a file |
 | `dust help [COMMAND]` | Show command help |
 | `dust --version` | Show the installed version; short form: `-V` |
@@ -358,7 +359,29 @@ dust run crawler --resume state/crawl.json --max-turns 10 --json
 
 Resume preserves the original input and requires the same manifest and working directory. To correct a completed response, append a follow-up prompt: `dust run crawler --resume /tmp/dust-run-XXXXXX/state.json --max-turns 5 "Return the previous result in the required JSON format."`. The text becomes a new user message after the saved conversation; checker/experience input remains the original task. Whitespace-only follow-ups are rejected. Each resumed invocation grants an additional turn/time budget. Confirmed tool results remain in the conversation; they are not automatically replayed. MCP processes restart, so browser sessions and remote state are not restored. The model can still request new operations.
 
-Checkpoints are atomically saved with filesystem synchronization, owner-only Unix permissions, and a 32 MiB size limit. The CLI holds an exclusive sidecar lock released automatically when its process exits. A safe boundary after a tool batch or before a model request can resume; an interrupted tool call, unknown transport outcome, or interrupted output checker cannot. Completed checkpoints may continue only with a nonempty follow-up prompt. There is no force-resume option or automatic continuation. Keep `--report` and checkpoint paths distinct. See [checkpoint behavior](docs/13_체크포인트_및_재개.md) for details. Building from source requires Rust 1.89 or newer.
+Checkpoints are atomically saved with filesystem synchronization, owner-only Unix permissions, and a 32 MiB size limit. The CLI holds an exclusive sidecar lock released automatically when its process exits. A safe boundary after a tool batch or before a model request can resume; an interrupted tool call, unknown transport outcome, or interrupted output checker cannot. After checking the external system, `dust reconcile` can attach an observed result and unblock a checkpoint without calling the tool again. Completed checkpoints may continue only with a nonempty follow-up prompt. There is no force-resume option or automatic continuation. Keep `--report` and checkpoint paths distinct. See [checkpoint behavior](docs/13_체크포인트_및_재개.md) for details. Building from source requires Rust 1.89 or newer.
+
+### Tool effects and bounded parallel execution
+
+MCP tools are sequential by default. An app can declare a tool read-only, or declare it idempotent only when its server honors the injected operation key:
+
+```json
+{
+  "mcp_servers": {
+    "catalog": {
+      "command": "catalog-mcp",
+      "read_only_tools": ["lookup"]
+    },
+    "orders": {
+      "command": "orders-mcp",
+      "idempotent_tools": ["create_or_get"],
+      "idempotency_key_argument": "operation_key"
+    }
+  }
+}
+```
+
+Dust runs a batch concurrently only when every call is explicitly read-only or idempotent, each uses a different MCP server, and the batch has at most four calls. Other batches remain sequential. Results return to the conversation in the model's original call order. A tool's effect is an app-owner declaration; Dust does not infer or verify its behavior. Reports include sanitized provider status, request/trace IDs, retry delay, and stream terminal state when the provider supplies them. See [tool effects, diagnostics, and recovery](docs/21_도구_효과_진단_및_복구.md).
 
 ## Completion feedback, recovery, and working state
 

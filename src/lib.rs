@@ -16,7 +16,7 @@ pub use domain::manifest::{
     resolve_manifest_path,
 };
 pub use domain::patch::{LineRange, PatchError, SearchReplaceBlock, extract_blocks};
-pub use error::{DustError, ProviderFailure, Result};
+pub use error::{DustError, ProviderDiagnostics, ProviderFailure, ProviderStreamTerminal, Result};
 pub use ports::llm::{
     ChatMessage, LlmCompletion, LlmProvider, LlmResponse, LlmUsage, ToolCall, ToolDefinition,
 };
@@ -24,7 +24,7 @@ pub use ports::mcp::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpClient, M
 pub use ports::patcher::CodePatcher;
 
 pub use application::execution::{
-    ExecutionReport, StopReason, TokenUsageSummary, ToolRecord, ToolStatus, TurnRecord,
+    ExecutionReport, StopReason, TokenUsageSummary, ToolEffect, ToolRecord, ToolStatus, TurnRecord,
 };
 
 pub use application::checkpoint::{Checkpoint, CheckpointPhase};

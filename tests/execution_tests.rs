@@ -1,12 +1,15 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use dustagent::ports::mcp::{McpClient, McpTool};
 use dustagent::{
-    AppManifest, ChatMessage, DustCore, LlmProvider, LlmResponse, StopReason, ToolCall,
-    ToolDefinition, ToolStatus,
+    AppManifest, ChatMessage, DustCore, LlmProvider, LlmResponse, McpServerConfig, StopReason,
+    ToolCall, ToolDefinition, ToolStatus,
 };
 use serde_json::{Value, json};
 
@@ -62,6 +65,199 @@ fn observation() -> LlmResponse {
         tool_calls: Some(vec![ToolCall::new("call1", "source__observe", "{}")]),
     }
 }
+
+#[derive(Clone, Default)]
+struct ConcurrencyProbe {
+    active: Arc<AtomicUsize>,
+    maximum: Arc<AtomicUsize>,
+}
+
+struct DelayedTool {
+    name: String,
+    probe: ConcurrencyProbe,
+    arguments: Arc<Mutex<Vec<Value>>>,
+    schema: Value,
+}
+
+#[async_trait]
+impl McpClient for DelayedTool {
+    async fn initialize(&mut self) -> dustagent::Result<()> {
+        Ok(())
+    }
+
+    async fn list_tools(&mut self) -> dustagent::Result<Vec<McpTool>> {
+        Ok(vec![McpTool::new(
+            self.name.clone(),
+            None,
+            self.schema.clone(),
+        )])
+    }
+
+    async fn call_tool(&mut self, name: &str, arguments: Value) -> dustagent::Result<Value> {
+        self.arguments.lock().unwrap().push(arguments);
+        let active = self.probe.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.probe.maximum.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        self.probe.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(json!({"tool": name}))
+    }
+
+    async fn close(&mut self) -> dustagent::Result<()> {
+        Ok(())
+    }
+}
+
+fn execution_tool_call(name: &str, id: &str) -> ToolCall {
+    ToolCall::new(id, name, "{}")
+}
+
+fn effect_config(tool: &str, read_only: bool) -> McpServerConfig {
+    let mut config = McpServerConfig::new("not-started-test-client");
+    if read_only {
+        config.read_only_tools.push(tool.into());
+    }
+    config
+}
+
+fn tool_schema() -> Value {
+    json!({"type":"object","properties":{}})
+}
+
+fn dispatch_provider(calls: Vec<ToolCall>) -> Provider {
+    Provider::new(vec![
+        Ok(LlmResponse::tool_calls(calls)),
+        Ok(LlmResponse::text("done")),
+    ])
+}
+
+#[tokio::test]
+async fn declared_read_only_calls_run_in_bounded_parallel_and_keep_order() {
+    let probe = ConcurrencyProbe::default();
+    let first_args = Arc::new(Mutex::new(Vec::new()));
+    let second_args = Arc::new(Mutex::new(Vec::new()));
+    let manifest = AppManifest::new()
+        .with_mcp_server("first", effect_config("observe", true))
+        .with_mcp_server("second", effect_config("observe", true));
+    let mut core = DustCore::new(
+        manifest,
+        dispatch_provider(vec![
+            execution_tool_call("first__observe", "one"),
+            execution_tool_call("second__observe", "two"),
+        ]),
+    )
+    .with_mcp_client(
+        "first",
+        Box::new(DelayedTool {
+            name: "observe".into(),
+            probe: probe.clone(),
+            arguments: first_args,
+            schema: tool_schema(),
+        }),
+    )
+    .with_mcp_client(
+        "second",
+        Box::new(DelayedTool {
+            name: "observe".into(),
+            probe: probe.clone(),
+            arguments: second_args,
+            schema: tool_schema(),
+        }),
+    );
+
+    let report = core.execute_report("observe safely").await;
+    assert_eq!(report.stop_reason, StopReason::Completed);
+    assert_eq!(probe.maximum.load(Ordering::SeqCst), 2);
+    assert_eq!(report.tool_calls.len(), 2);
+    assert_eq!(report.tool_calls[0].call_id, "one");
+    assert_eq!(
+        report.tool_calls[0].output.as_deref(),
+        Some(r#"{"tool":"observe"}"#)
+    );
+    assert_eq!(report.tool_calls[1].call_id, "two");
+    assert_eq!(
+        report.tool_calls[1].output.as_deref(),
+        Some(r#"{"tool":"observe"}"#)
+    );
+}
+
+#[tokio::test]
+async fn undeclared_effect_calls_remain_serial() {
+    let probe = ConcurrencyProbe::default();
+    let manifest = AppManifest::new()
+        .with_mcp_server("first", McpServerConfig::new("not-started-test-client"))
+        .with_mcp_server("second", McpServerConfig::new("not-started-test-client"));
+    let mut core = DustCore::new(
+        manifest,
+        dispatch_provider(vec![
+            execution_tool_call("first__send", "one"),
+            execution_tool_call("second__send", "two"),
+        ]),
+    )
+    .with_mcp_client(
+        "first",
+        Box::new(DelayedTool {
+            name: "send".into(),
+            probe: probe.clone(),
+            arguments: Arc::new(Mutex::new(Vec::new())),
+            schema: tool_schema(),
+        }),
+    )
+    .with_mcp_client(
+        "second",
+        Box::new(DelayedTool {
+            name: "send".into(),
+            probe: probe.clone(),
+            arguments: Arc::new(Mutex::new(Vec::new())),
+            schema: tool_schema(),
+        }),
+    );
+
+    let report = core.execute_report("send carefully").await;
+    assert_eq!(report.stop_reason, StopReason::Completed);
+    assert_eq!(probe.maximum.load(Ordering::SeqCst), 1);
+    assert_eq!(report.tool_calls.len(), 2);
+}
+
+#[tokio::test]
+async fn idempotent_tool_receives_persisted_operation_id() {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut config = McpServerConfig::new("not-started-test-client");
+    config.idempotent_tools.push("send".into());
+    config.idempotency_key_argument = Some("operation_key".into());
+    let schema = json!({
+        "type":"object",
+        "properties":{"operation_key":{"type":"string"}},
+        "required":[]
+    });
+    let manifest = AppManifest::new().with_mcp_server("remote", config);
+    let mut core = DustCore::new(
+        manifest,
+        dispatch_provider(vec![execution_tool_call("remote__send", "send-1")]),
+    )
+    .with_mcp_client(
+        "remote",
+        Box::new(DelayedTool {
+            name: "send".into(),
+            probe: ConcurrencyProbe::default(),
+            arguments: recorded.clone(),
+            schema,
+        }),
+    );
+
+    let report = core.execute_report("send once").await;
+    assert_eq!(report.stop_reason, StopReason::Completed);
+    let operation_id = report.tool_calls[0].operation_id.as_deref().unwrap();
+    assert_eq!(
+        report.tool_calls[0].effect,
+        dustagent::ToolEffect::Idempotent
+    );
+    assert_eq!(
+        report.tool_calls[0].arguments["operation_key"],
+        operation_id
+    );
+    assert_eq!(recorded.lock().unwrap()[0]["operation_key"], operation_id);
+}
+
 #[tokio::test]
 async fn exhaustion_retains_actual_evidence_and_partial_text() {
     let provider = Provider::new(vec![Ok(observation())]);
