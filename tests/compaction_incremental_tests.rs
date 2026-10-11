@@ -213,7 +213,7 @@ async fn staged_turn_limit_retains_active_complete_batch_and_archived_partial_no
 }
 #[tokio::test]
 async fn staged_deadline_does_not_reset_between_chunks_or_dispatch_task() {
-    let (mut core, seed, requests, dir) = fixture(32, Some(2), false);
+    let (mut core, seed, requests, dir) = fixture_with_window(32, Some(2), false, 4096);
     let report = core.resume_report(&seed).await;
     assert_eq!(report.stop_reason, StopReason::TimeLimit);
     assert_eq!(report.turns_used, 2);

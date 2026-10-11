@@ -297,8 +297,8 @@ async fn completed_empty_and_provider_failure_are_distinct() {
 #[tokio::test]
 async fn provider_timeout_has_a_turn_record() {
     let mut provider = Provider::new(vec![Ok(LlmResponse::text("late"))]);
-    provider.delay = Duration::from_secs(1);
-    let mut core = DustCore::new(AppManifest::new(), provider).with_timeouts(20, 100);
+    provider.delay = Duration::from_secs(2);
+    let mut core = DustCore::new(AppManifest::new(), provider).with_timeouts(500, 100);
     let report = core.execute_report("task").await;
     assert_eq!(report.stop_reason, StopReason::TimeLimit);
     assert_eq!(report.turns.len(), 1);

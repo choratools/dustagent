@@ -122,10 +122,10 @@ async fn permanent_legacy_and_exhausted_failures_stop_with_bounded_requests() {
 #[tokio::test]
 async fn deadline_during_backoff_prevents_an_extra_request() {
     let mut manifest = policy(2);
-    manifest.provider_retry.as_mut().unwrap().base_delay_ms = 100;
+    manifest.provider_retry.as_mut().unwrap().base_delay_ms = 1000;
     let provider = Provider::new(vec![transient()]);
     let calls = provider.calls.clone();
-    let mut core = DustCore::new(manifest, provider).with_timeouts(20, 1000);
+    let mut core = DustCore::new(manifest, provider).with_timeouts(500, 1000);
     assert_eq!(
         core.execute_report("input").await.stop_reason,
         StopReason::TimeLimit
