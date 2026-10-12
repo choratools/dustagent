@@ -221,6 +221,10 @@ pub struct AppManifest {
     /// Preferred output format (e.g. "raw_json", "search_replace_patch").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_format: Option<String>,
+    /// Optional native contract for the final response. Invalid candidates are
+    /// sent back to the model as bounded feedback within the existing budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<crate::application::output_schema::OutputSchema>,
     /// Optional max conversation turns for tool calling loop (default: 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
@@ -261,6 +265,11 @@ impl AppManifest {
     pub fn from_json_str(content: &str) -> Result<Self> {
         let manifest: Self = serde_json::from_str(content)
             .map_err(|e| DustError::Manifest(format!("Failed to parse manifest JSON: {e}")))?;
+        if let Some(schema) = &manifest.output_schema {
+            schema
+                .validate()
+                .map_err(|error| DustError::Manifest(format!("Invalid output_schema: {error}")))?;
+        }
         manifest.validate_native_namespace()?;
         manifest.validate_model_configurations()?;
         for config in manifest.mcp_servers.values() {

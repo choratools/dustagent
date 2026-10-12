@@ -9,6 +9,9 @@ pub mod reinforcement;
 
 pub mod validation;
 
+pub mod output_schema;
+pub use output_schema::{OutputSchema, OutputType};
+
 pub mod research;
 
 pub mod execution;

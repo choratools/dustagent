@@ -304,13 +304,13 @@ Reports distinguish final responses from tool observations. They contain `stop_r
 
 | Exit code | Stop reason | Meaning |
 | :--- | :--- | :--- |
-| `0` | `completed` | Nonempty final response; configured output checker passed, if present |
+| `0` | `completed` | Nonempty final response; configured `output_schema` and checker passed, if present |
 | `1` | CLI/setup error | Invalid input, configuration, or report-file I/O failure |
 | `2` | `turn_limit` | Model turn budget exhausted |
 | `3` | `time_limit` / `tool_timeout` | Overall or individual tool deadline exhausted |
 | `4` | `empty_response` | Model ended without nonempty final content |
 | `5` | `execution_error` | Execution failed, such as a provider request error |
-| `6` | `validation_failed` | Configured checker rejected the output |
+| `6` | `validation_failed` | A configured output schema or checker rejected the output |
 | `7` | `cancelled` | Library cancellation; ACP returns a cancelled prompt response without exiting the process |
 
 Without `--json`, only completed runs emit task output on STDOUT. With `--json`, failed runs also emit their report; callers must still inspect the exit code. `--report` saves the report atomically with owner-only permissions on Unix. Reports can include sensitive task and tool data.
@@ -425,7 +425,7 @@ No run IDs or individual approval commands are needed. The reinforcement flow is
 
 ```text
 Recorded input/output
-  → output-format check
+  → configured output schema check
   → configured local checker, if present
   → relevant documentation lookup
   → model review with the collected evidence
@@ -437,7 +437,7 @@ The CLI proposes up to two official documentation URLs per reviewed example and 
 
 Review processes at most ten pending completed examples per invocation. Selected examples are matched by word overlap; at most three examples and 8 KiB of their combined input/output enter the next task's context. The app prompt and tool declarations remain in place. Model weights are not changed.
 
-Recording is opt-in. Both `run` and `learn` accept `--experience-dir PATH`; on `run`, that option also enables experience. The default store is `~/.dustagent/experiences/`. Records are scoped by the full manifest: changing the prompt, tools, checker, or research settings starts a separate set of examples and preserves the old files.
+Recording is opt-in. Both `run` and `learn` accept `--experience-dir PATH`; on `run`, that option also enables experience. The default store is `~/.dustagent/experiences/`. Records are scoped by the full manifest: changing the prompt, tools, output schema, checker, or research settings starts a separate set of examples and preserves the old files.
 
 Records include task inputs and outputs. Review sends those records and collected evidence to the configured model API and can make additional HTTP requests. A selected example is useful reference material, not proof of correctness. Checker success establishes only what the checker tested; document excerpts establish only what was actually fetched.
 
@@ -475,6 +475,31 @@ dust learn checked_summary --list
 ```
 
 Its checker validates the JSON shape and summary length, not factual accuracy. See [the experience guide](docs/11_경험_기반_자기강화.md) for storage limits, source retrieval, and the library interfaces. [reinforcer](apps/reinforcer.json) exposes the review prompt as a separate app; the CLI connects the actual checks, retrieval, and persistence.
+
+### Require a JSON output shape
+
+For deterministic JSON requirements, declare `output_schema` in the app manifest. DustAgent includes the schema in the model instructions, parses the entire final response as JSON, and checks the declared constraints before marking the run complete:
+
+```json
+{
+  "output_format": "raw_json",
+  "output_schema": {
+    "type": "object",
+    "required": ["summary", "tags"],
+    "additionalProperties": false,
+    "properties": {
+      "summary": {"type": "string", "minLength": 1, "maxLength": 200},
+      "tags": {
+        "type": "array",
+        "minItems": 1,
+        "items": {"type": "string", "enum": ["rust", "agents", "tools"]}
+      }
+    }
+  }
+}
+```
+
+Invalid JSON, wrong types, missing required fields, and other violations become bounded feedback for the model. DustAgent keeps working within the same turn and time budgets; it does not add an unbounded retry loop. This built-in subset supports `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, numeric bounds (`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`), string bounds and `pattern`, and array bounds. `pattern` uses Rust regular-expression syntax. Unsupported schema keywords are rejected when loading the manifest. An optional `validation` command runs after the built-in schema passes, so app-specific checks can verify additional conditions.
 
 ## App manifests and scoped tools
 
