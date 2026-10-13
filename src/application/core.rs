@@ -63,6 +63,7 @@ pub struct DustCore<P: LlmProvider> {
     checkpoint_path: Option<PathBuf>,
     working_state: super::state::WorkingState,
     skills: Option<super::skills::SkillCatalog>,
+    app_tools: Option<super::tools::ToolCatalog>,
     skill_prompt: Option<String>,
     resource_hash: Option<String>,
     app_root: Option<PathBuf>,
@@ -97,6 +98,7 @@ impl<P: LlmProvider> DustCore<P> {
             checkpoint_path: None,
             working_state: super::state::WorkingState::default(),
             skills: None,
+            app_tools: None,
             skill_prompt: None,
             resource_hash: None,
             app_root: None,
@@ -147,11 +149,24 @@ impl<P: LlmProvider> DustCore<P> {
     /// Attach only this application's explicitly declared skills.
     pub fn with_app_resources(mut self, root: &Path, package_hash: Option<&str>) -> Result<Self> {
         self.manifest.validate_model_configurations()?;
+        self.manifest.validate_native_namespace()?;
+        super::tools::validate_configs(&self.manifest.tools)?;
         self.app_root = Some(root.canonicalize()?);
         let catalog = super::skills::SkillCatalog::load(root, &self.manifest.skills)
             .map_err(|error| DustError::Config(format!("Invalid app skills: {error:#}")))?;
         self.resource_hash =
             resource_hash(package_hash, &catalog, !self.manifest.skills.is_empty());
+        let tool_catalog = super::tools::ToolCatalog::load(root, &self.manifest.tools)?;
+        if !self.manifest.tools.is_empty() {
+            use sha2::{Digest, Sha256};
+            self.resource_hash = Some(format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(
+                    &serde_json::json!({"resources":self.resource_hash,"app_tools":tool_catalog.digest()})
+                )?)
+            ));
+        }
+        self.app_tools = Some(tool_catalog);
         let policy = self.model_skill_config();
         let prompt = catalog.prompt(&policy).map_err(|error| {
             DustError::Config(format!("Invalid skill loading policy: {error:#}"))
@@ -541,7 +556,17 @@ impl<P: LlmProvider> DustCore<P> {
     /// Each tool is namespaced as `{server_name}__{tool_name}` to prevent name collisions.
     pub async fn gather_mcp_tools(&mut self) -> Result<Vec<ToolDefinition>> {
         self.manifest.validate_native_namespace()?;
-        let mut tools = Vec::new();
+        super::tools::validate_configs(&self.manifest.tools)?;
+        if self.app_tools.is_none() && !self.manifest.tools.is_empty() {
+            return Err(DustError::Config(
+                "Declared tools require with_app_resources or load_manifest".into(),
+            ));
+        }
+        let mut tools = self
+            .app_tools
+            .as_ref()
+            .map(|catalog| catalog.definitions())
+            .unwrap_or_default();
         let mut poisoned = Vec::new();
         for (srv_name, client) in &mut self.mcp_clients {
             match timeout(
@@ -674,6 +699,9 @@ impl<P: LlmProvider> DustCore<P> {
         let Some((server, tool)) = full_tool_name.split_once("__") else {
             return ToolEffect::ExternalUnknown;
         };
+        if server == "app" {
+            return ToolEffect::ExternalUnknown;
+        }
         if server == "dustagent" {
             return match full_tool_name {
                 "dustagent__history_read"
@@ -1001,6 +1029,21 @@ impl<P: LlmProvider> DustCore<P> {
 
     /// Dispatches a namespaced tool execution to the appropriate MCP server.
     pub async fn execute_tool(&mut self, full_tool_name: &str, arguments: Value) -> Result<String> {
+        if let Some(name) = full_tool_name.strip_prefix("app__") {
+            let catalog = self
+                .app_tools
+                .as_ref()
+                .ok_or_else(|| DustError::Config("No app-local tool catalog attached".into()))?;
+            // Known rejections and completed process failures are observations
+            // the model can repair. Unobserved IO failures remain errors so the
+            // execution lifecycle blocks uncertain side effects.
+            return match catalog.call(name, arguments).await {
+                Err(DustError::Config(reason)) => {
+                    Ok(serde_json::json!({"isError": true, "error": reason}).to_string())
+                }
+                result => result,
+            };
+        }
         if matches!(
             full_tool_name,
             "dustagent__history_read"
@@ -1298,7 +1341,12 @@ impl<P: LlmProvider> DustCore<P> {
             }};
         }
         report.warnings.append(&mut self.lifecycle_warnings);
-        if let Err(error) = self.manifest.validate_model_configurations() {
+        if let Err(error) = self
+            .manifest
+            .validate_model_configurations()
+            .and_then(|_| self.manifest.validate_native_namespace())
+            .and_then(|_| super::tools::validate_configs(&self.manifest.tools))
+        {
             report.error = Some(error.to_string());
             return finish_with_prior(report, started, prior_ms);
         }
@@ -1315,6 +1363,11 @@ impl<P: LlmProvider> DustCore<P> {
         {
             report.error =
                 Some("Declared skills require with_app_resources or load_manifest".into());
+            return finish_with_prior(report, started, prior_ms);
+        }
+        if self.app_tools.is_none() && !self.manifest.tools.is_empty() {
+            report.error =
+                Some("Declared tools require with_app_resources or load_manifest".into());
             return finish_with_prior(report, started, prior_ms);
         }
         let deadline = started + Duration::from_millis(self.timeout_ms);
@@ -2145,7 +2198,12 @@ impl<P: LlmProvider> DustCore<P> {
                         .function_name
                         .split_once("__")
                         .is_some_and(|(server, _)| {
-                            server != "dustagent" && self.mcp_clients.contains_key(server)
+                            (server == "app"
+                                && self
+                                    .app_tools
+                                    .as_ref()
+                                    .is_some_and(|catalog| catalog.contains(&tc.function_name)))
+                                || (server != "dustagent" && self.mcp_clients.contains_key(server))
                         });
                 let dispatch = match parallel_dispatches.as_ref() {
                     Some(outcomes) => outcomes[call_index].clone(),

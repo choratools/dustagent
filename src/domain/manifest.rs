@@ -215,6 +215,9 @@ pub struct AppManifest {
     /// Default LLM model identifier (e.g. "gpt-4o-mini", "claude-3-5-sonnet").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// App-local callable tools packaged under tools/.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tools: HashMap<String, crate::application::tools::AppToolConfig>,
     /// Scoped MCP servers attached to this application.
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
@@ -271,6 +274,7 @@ impl AppManifest {
                 .map_err(|error| DustError::Manifest(format!("Invalid output_schema: {error}")))?;
         }
         manifest.validate_native_namespace()?;
+        crate::application::tools::validate_configs(&manifest.tools)?;
         manifest.validate_model_configurations()?;
         for config in manifest.mcp_servers.values() {
             config.validate_chroot()?;
@@ -306,6 +310,11 @@ impl AppManifest {
 
     /// Native tool namespace cannot be replaced by a configured MCP server.
     pub fn validate_native_namespace(&self) -> Result<()> {
+        if self.mcp_servers.contains_key("app") {
+            return Err(DustError::Manifest(
+                "MCP namespace app is reserved for app-local tools".into(),
+            ));
+        }
         if self.mcp_servers.contains_key("dustagent") {
             return Err(DustError::Manifest(
                 "MCP namespace dustagent is reserved for native tools".into(),

@@ -96,7 +96,7 @@ fn private_dir(path: &Path) -> Result<()> {
         if metadata.permissions().mode() & 0o777 != 0o700 {
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     {

@@ -32,3 +32,5 @@ pub mod session;
 
 pub mod compaction;
 pub mod transcript;
+
+pub mod tools;

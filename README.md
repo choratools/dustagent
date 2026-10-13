@@ -8,7 +8,7 @@
 > 직접 `dust`를 쓰려고요? Agent한테 시키세요.
 > Let your agent create, run, and improve the agents it needs.
 
-DustAgent is a Rust runtime for **Agent as an Application (AaaA)**. Each application is a JSON manifest with a focused prompt and its own MCP servers. It accepts a task, calls an OpenAI-compatible model, runs tool calls when needed, and returns the result.
+DustAgent is a Rust runtime for **Agent as an Application (AaaA)**. Each application is a JSON manifest with a focused prompt, its own skills, and explicitly declared app tools or MCP servers. It accepts a task, calls an OpenAI-compatible model, runs tool calls when needed, and returns the result.
 
 Your coding agent or automation owns the larger task. DustAgent supplies focused workers: generate a commit message, extract data, diagnose an error, or produce a patch. With experience enabled, it also records runs, investigates relevant documentation, and selects examples to reuse.
 
@@ -240,13 +240,37 @@ dust install ./coverage-reader-0.1.0.dustpkg
 dust run coverage-reader "discovered=290 observed=100 distinct items"
 ```
 
-A package contains root `app.json`, its own `skills/`, and optional README/LICENSE files. The manifest declares `package: {"name":"coverage-reader","version":"0.1.0","dust_version":">=0.1.0"}` and `skills: ["coverage"]`. Each declared skill has YAML-frontmatter `SKILL.md` plus optional `references/`, `scripts/`, and `assets/`, following the [Agent Skills directory format](https://agentskills.io/specification). Names and descriptions are shown first; `dustagent__read_skill` loads instructions or UTF-8 resource files on demand. Undeclared skills, path traversal, and symlinks are rejected. Reads are limited to 64 KiB; binaries can be bundled but cannot be read through this text tool.
+A package contains root `app.json`, its own `skills/`, optional callable `tools/`, and optional README/LICENSE files. The manifest declares `package: {"name":"coverage-reader","version":"0.1.0","dust_version":">=0.1.0"}` and `skills: ["coverage"]`. Each declared skill has YAML-frontmatter `SKILL.md` plus optional `references/`, `scripts/`, and `assets/`, following the [Agent Skills directory format](https://agentskills.io/specification). Names and descriptions are shown first; `dustagent__read_skill` loads instructions or UTF-8 resource files on demand. Undeclared skills, path traversal, and symlinks are rejected. Reads are limited to 64 KiB; binaries can be bundled but cannot be read through this text tool.
 
 Plain `.dustpkg` files are bounded tar.gz archives with root contents. `pack --encrypt` encrypts the entire compressed archive with AES-256-GCM; Argon2id derives the key from the passphrase. Only package name and version remain visible in the encrypted file header. A wrong passphrase or modified ciphertext is rejected before extraction. Packing and installing validate declared skills and never run hooks or skill scripts. Existing destinations are not overwritten. Runtime compatibility accepts an exact `X.Y.Z` or `>=X.Y.Z`. The default store is `~/.dustagent/packages`; set `DUST_PACKAGE_HOME`, or use `install --store` with the same store when resolving installed names. Archive execution decrypts into a private temporary directory and removes it after the run. Package content hashes bind checkpoint resume across extraction locations.
 
 Encryption protects a package at rest and while it is distributed; it does not hide prompts from someone who has the passphrase and runs the app. Runtime memory, the model request, and Dust's normal execution history/checkpoints can contain decrypted prompt text. The passphrase is not recoverable, so keep a secure backup.
 
 Skill access restrictions apply to the native skill reader. Explicit MCP servers and checkers keep their declared capabilities; this is not a process sandbox. Their executables/dependencies must already be installed, and relative command/checker paths still resolve from the caller's working directory. `allowed-tools` metadata does not grant execution permissions. See [package and skill guide](docs/14_앱_패키지_및_스킬.md).
+
+### App-owned callable tools
+
+Declare callable tools in `app.json` alongside skills. Dust exposes only this app's declared tools as `app__<name>`; skills explain how to use them. No MCP server is started. Each invocation runs the declared interpreter with a packaged `tools/` entrypoint, sends validated JSON arguments on STDIN, and reads one JSON result from STDOUT.
+
+```json
+{
+  "tools": {
+    "text_stats": {
+      "description": "Count characters in supplied text",
+      "input_schema": {
+        "type": "object",
+        "properties": { "text": { "type": "string" } },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "command": "python3",
+      "entrypoint": "tools/text_stats.py"
+    }
+  }
+}
+```
+
+The interpreter and dependencies must already be installed. Packing, installing, and loading skills do not execute tool code. Calls use the existing timeout, reporting, transcript, and checkpoint lifecycle; uncertain side effects require reconciliation and are never automatically replayed. Tool code uses the host user's permissions. See the [app tool guide](docs/22_앱_내장_도구.md) and [text-stats example](apps/text-stats/app.json).
 
 ### Model-specific skill loading
 

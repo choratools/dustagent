@@ -336,6 +336,8 @@ fn directory(root: &Path, guard: Option<TempDir>) -> Result<LoadedApp> {
     validate_manifest(&manifest)?;
     super::skills::SkillCatalog::load(&root, &manifest.skills)
         .map_err(|e| invalid(format!("Invalid package skills: {e}")))?;
+    super::tools::ToolCatalog::load(&root, &manifest.tools)
+        .map_err(|e| invalid(format!("Invalid package tools: {e}")))?;
     let digest = Some(content_digest(&root, &files)?);
     Ok(LoadedApp {
         manifest,
@@ -447,6 +449,8 @@ fn load_with_optional_password(
         if manifest.package.is_some() {
             return directory(&root, None);
         }
+        super::tools::ToolCatalog::load(&root, &manifest.tools)
+            .map_err(|e| invalid(format!("Invalid app tools: {e}")))?;
         return Ok(LoadedApp {
             manifest,
             root,
