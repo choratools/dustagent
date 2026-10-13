@@ -1746,7 +1746,7 @@ impl<P: LlmProvider> DustCore<P> {
                         messages_after: replacement.len(),
                         context_window_tokens: compact_config
                             .context_window_tokens
-                            .unwrap_or(32_768),
+                            .unwrap_or(256_000),
                         trigger_tokens: compact_config.trigger_tokens,
                         max_summary_tokens: compact_config.max_summary_tokens,
                         max_summary_bytes: compact_config.max_summary_bytes,

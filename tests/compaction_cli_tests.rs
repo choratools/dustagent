@@ -468,7 +468,7 @@ fn acp_history_is_session_scoped_and_cannot_read_a_caller_chosen_path() {
 }
 
 #[test]
-fn default_policy_handles_one_large_latest_tool_result_without_unsummarizable_failure() {
+fn default_256k_policy_bounds_a_tool_result_that_exceeds_message_limits() {
     let dir = tempfile::tempdir().unwrap();
     let app = app(dir.path(), true);
     let mut manifest: Value =
@@ -494,8 +494,8 @@ fn default_policy_handles_one_large_latest_tool_result_without_unsummarizable_fa
         .as_str()
         .unwrap();
     assert!(
-        feedback.len() < 20000,
-        "model-facing result is bounded while original remains full"
+        feedback.len() < 100000,
+        "model-facing result remains bounded while the original is archived"
     );
     assert!(feedback.contains("original record 4 is preserved"));
 }

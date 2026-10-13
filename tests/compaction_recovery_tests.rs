@@ -64,6 +64,7 @@ fn fixture(
     manifest.max_turns = Some(max_turns);
     manifest.timeout_ms = Some(1000);
     manifest.compaction = Some(CompactionConfig {
+        context_window_tokens: Some(32_768),
         max_summary_bytes: 512,
         max_summary_retries: retries,
         ..Default::default()
@@ -280,6 +281,10 @@ async fn utf8_summary_over_auto_token_cap_recovers_and_report_survives_archive_c
     let calls = Arc::new(Mutex::new(Calls::default()));
     let mut manifest = AppManifest::new();
     manifest.max_turns = Some(8);
+    manifest.compaction = Some(CompactionConfig {
+        context_window_tokens: Some(32_768),
+        ..Default::default()
+    });
     let model = Scripted {
         responses: Mutex::new(
             vec![
@@ -359,7 +364,12 @@ async fn summary_provider_error_is_diagnosed_without_validation_retry() {
         calls: calls.clone(),
         delay: Duration::ZERO,
     });
-    let mut core = DustCore::new(AppManifest::new(), provider);
+    let mut manifest = AppManifest::new();
+    manifest.compaction = Some(CompactionConfig {
+        context_window_tokens: Some(32_768),
+        ..Default::default()
+    });
+    let mut core = DustCore::new(manifest, provider);
     let mut session = AgentSession::new();
     for input in ["Investigate authentication", "Check auth_result"] {
         assert_eq!(
