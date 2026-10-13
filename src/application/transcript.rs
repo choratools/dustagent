@@ -80,16 +80,32 @@ fn hash(previous: &str, line: &[u8]) -> String {
     format!("{:x}", digest.finalize())
 }
 fn private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)?;
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Err(invalid());
-    }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path)?;
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(invalid());
+        }
+        // AgentForge blocks metadata-mutating syscalls after applying its
+        // filesystem sandbox. Avoid an unnecessary chmod when the directory
+        // was already created privately.
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+        return Ok(());
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path)?;
+        if fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(invalid());
+        }
+        Ok(())
+    }
 }
 impl TranscriptStore {
     pub fn create(binding: &str) -> Result<Self> {
