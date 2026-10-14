@@ -270,6 +270,8 @@ Declare callable tools in `app.json` alongside skills. Dust exposes only this ap
 }
 ```
 
+Tool source code is not automatically placed in the model prompt. The model receives the declared name, description, and input schema; an app-owned skill can explain when and how to call it. Tool registration is independent of skill preload settings. JSON input and STDOUT are each limited to 1 MiB, and STDERR to 64 KiB. Tools return one JSON value; the app’s `output_schema` validates the agent’s final response rather than individual tool results.
+
 The interpreter and dependencies must already be installed. Packing, installing, and loading skills do not execute tool code. Calls use the existing timeout, reporting, transcript, and checkpoint lifecycle; uncertain side effects require reconciliation and are never automatically replayed. Tool code uses the host user's permissions. See the [app tool guide](docs/22_앱_내장_도구.md) and [text-stats example](apps/text-stats/app.json).
 
 ### Model-specific skill loading
