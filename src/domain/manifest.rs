@@ -185,6 +185,10 @@ pub struct AppManifest {
     /// Exact actual model IDs; "*" is the optional fallback.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub model_configurations: HashMap<String, ModelConfiguration>,
+    /// Maximum retained and model-facing bytes per ordinary tool result (1..=1 MiB).
+    /// Omitted preserves the 64 KiB default; native history reads remain separately bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output_max_bytes: Option<usize>,
     /// Context compaction policy; omitted uses conservative automatic defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<crate::application::compaction::CompactionConfig>,
@@ -290,6 +294,14 @@ impl AppManifest {
     }
 
     pub fn validate_model_configurations(&self) -> Result<()> {
+        if self
+            .tool_output_max_bytes
+            .is_some_and(|limit| !(1..=1_048_576).contains(&limit))
+        {
+            return Err(DustError::Manifest(
+                "tool_output_max_bytes must be 1..=1048576".into(),
+            ));
+        }
         if self.model_configurations.len() > 128 {
             return Err(DustError::Manifest(
                 "At most 128 model configurations are allowed".into(),

@@ -158,6 +158,7 @@ impl McpClient for MockMcpClient {
 async fn test_single_shot_execution_without_tools() {
     let manifest = AppManifest {
         model_configurations: Default::default(),
+        tool_output_max_bytes: None,
         compaction: None,
         working_state: false,
         provider_retry: None,
@@ -218,6 +219,7 @@ async fn test_single_shot_execution_without_tools() {
 async fn test_multiturn_tool_execution() {
     let manifest = AppManifest {
         model_configurations: Default::default(),
+        tool_output_max_bytes: None,
         compaction: None,
         working_state: false,
         provider_retry: None,
@@ -342,6 +344,7 @@ async fn test_load_manifest_from_file_and_execute() {
 async fn test_tool_execution_error_handling() {
     let manifest = AppManifest {
         model_configurations: Default::default(),
+        tool_output_max_bytes: None,
         compaction: None,
         working_state: false,
         provider_retry: None,
@@ -394,6 +397,7 @@ async fn test_tool_execution_error_handling() {
 async fn test_max_turns_limit() {
     let manifest = AppManifest {
         model_configurations: Default::default(),
+        tool_output_max_bytes: None,
         compaction: None,
         working_state: false,
         provider_retry: None,

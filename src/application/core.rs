@@ -2310,10 +2310,11 @@ impl<P: LlmProvider> DustCore<P> {
                             | "dustagent__history_search"
                             | "dustagent__history_directory"
                     );
+                    let tool_output_cap = self.manifest.tool_output_max_bytes.unwrap_or(65_536);
                     let cap = if history_read {
                         65_536
                     } else {
-                        65_536usize.min(1_048_576usize.saturating_sub(retained))
+                        tool_output_cap.min(1_048_576usize.saturating_sub(retained))
                     };
                     let mut end = cap.min(output.len());
                     while !output.is_char_boundary(end) {
@@ -2324,8 +2325,10 @@ impl<P: LlmProvider> DustCore<P> {
                     retained += end;
                     let feedback_cap = if compact_config.enabled && !history_read {
                         compact_config.trigger_tokens.saturating_mul(3) / 4
-                    } else {
+                    } else if history_read {
                         65_536
+                    } else {
+                        tool_output_cap
                     };
                     let mut feedback_end = end.min(feedback_cap);
                     while !output.is_char_boundary(feedback_end) {
