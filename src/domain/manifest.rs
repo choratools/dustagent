@@ -235,6 +235,9 @@ pub struct AppManifest {
     /// Optional max conversation turns for tool calling loop (default: 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
+    /// Grant three finalization turns after the normal turn budget (default: false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap_up_on_limit: Option<bool>,
     /// Overall execution timeout in milliseconds (default: 300000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,

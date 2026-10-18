@@ -362,6 +362,17 @@ Example:
 
 Defaults are ten model turns, five minutes overall, and thirty seconds per tool call. App fields `max_turns`, `timeout_ms`, and `tool_timeout_ms` set defaults; CLI options override them. Timeout values support 1–86400000 milliseconds. The CLI's overall deadline includes MCP startup, automatic experience review, tool discovery, model requests, and tool calls. Bounded cancellation cleanup can add up to one second and shutdown has a separate five-second budget. Synchronous input/report file I/O is outside the async deadline.
 
+Set `"wrap_up_on_limit": true` in the manifest or pass `--wrap-up-on-limit` to grant three additional turns after `max_turns` is exhausted. This is disabled by default. `--wrap-up-on-limit=false` overrides an enabled manifest setting. Both `dust run` and `dust acp` accept the option:
+
+```sh
+dust run crawler --max-turns 10 --wrap-up-on-limit "Collect the results"
+dust run crawler --wrap-up-on-limit=false "Use only the normal turn budget"
+dust acp crawler --max-turns 10 --wrap-up-on-limit
+```
+
+When the normal budget expires, Dust records a wrap-up notice in the conversation and transcript, asking the model to finalize within the next three turns and preserve the original output requirements. Tools and output validation remain available; normal early completion still ends immediately. Reports include the extra turns in `turns_used` and a warning when wrap-up starts. A model that continues using tools beyond all three extra turns still stops with `turn_limit`; granting the turns does not guarantee a final response. These are the existing execution-loop turns, so compaction and validation repair also consume them. Overall deadlines, cancellation, provider errors, and uncertain tool outcomes keep their existing behavior and do not trigger extra time or tool replay. Resume grants a fresh per-invocation budget, including wrap-up when enabled.
+
+
 Timed-out MCP clients are discarded to avoid consuming a late response as a later request's result. A timed-out remote operation can still have executed; the runtime does not automatically replay it. Recovered tool failures remain visible in the report and prevent admission as successful experience examples. Output-check failures also prevent admission.
 
 Library callers use `execute_report()` or `execute_report_with_experience()` for structured results. Existing `execute()` methods return errors on incomplete execution. Library execution budgets cover discovery and execution; initialization is separately bounded. `completed` describes the execution contract, not exhaustive crawl coverage or factual correctness.

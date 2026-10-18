@@ -28,6 +28,7 @@ pub struct AcpOptions {
     pub app: String,
     pub model: Option<String>,
     pub max_turns: Option<usize>,
+    pub wrap_up_on_limit: Option<bool>,
     pub timeout_ms: Option<u64>,
     pub tool_timeout_ms: Option<u64>,
 }
@@ -356,7 +357,7 @@ where
                         Ok(cwd) => {
                             let model = options.model.clone().or_else(|| app.manifest.default_model.clone());
                             let core = AutoProvider::new(model).and_then(|provider| DustCore::new(app.manifest.clone(),provider).with_timeouts(total,tool).with_app_resources(&app.root,app.digest.as_deref())).and_then(|core| core.with_working_directory(&cwd));
-                            match core { Err(e) => error(id,-32000,e.to_string()), Ok(mut core) => { if let Some(turns) = options.max_turns { core = core.with_max_turns(turns); } next_session += 1; let sid = format!("dust-{next_session}"); let (cancel,_) = watch::channel(false); sessions.insert(sid.clone(),Session{core:Some(core),history:Some(AgentSession::new()),cancel,ready:false}); result(id,json!({"sessionId":sid})) } }
+                            match core { Err(e) => error(id,-32000,e.to_string()), Ok(mut core) => { if let Some(turns) = options.max_turns { core = core.with_max_turns(turns); } if let Some(enabled) = options.wrap_up_on_limit { core = core.with_wrap_up_on_limit(enabled); } next_session += 1; let sid = format!("dust-{next_session}"); let (cancel,_) = watch::channel(false); sessions.insert(sid.clone(),Session{core:Some(core),history:Some(AgentSession::new()),cancel,ready:false}); result(id,json!({"sessionId":sid})) } }
                         }
                     } }
                 } else if method == "session/prompt" {
@@ -558,6 +559,7 @@ mod tests {
             app: manifest.to_string_lossy().into_owned(),
             model: None,
             max_turns: None,
+            wrap_up_on_limit: None,
             timeout_ms: None,
             tool_timeout_ms: None,
         };

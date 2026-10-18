@@ -160,3 +160,53 @@ fn report_file_failure_does_not_hide_json_evidence() {
     );
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
 }
+
+#[test]
+fn wrap_up_flag_grants_finalization_turns() {
+    let (output, _) = run(
+        json!({"role":"assistant","content":"finished"}),
+        Duration::ZERO,
+        &["--json", "--max-turns", "0", "--wrap-up-on-limit"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["stop_reason"], "completed");
+    assert_eq!(report["turns_used"], 1);
+}
+
+#[test]
+fn explicit_false_overrides_manifest_wrap_up() {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = directory.path().join("app.json");
+    std::fs::write(&manifest, r#"{"wrap_up_on_limit":true,"max_turns":1}"#).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dust"))
+        .current_dir(directory.path())
+        .env("OPENAI_API_KEY", "local-test-only")
+        .env(
+            "OPENAI_BASE_URL",
+            endpoint(partial_message(), Duration::ZERO),
+        )
+        .args([
+            "run",
+            manifest.to_str().unwrap(),
+            "--json",
+            "--wrap-up-on-limit=false",
+            "task",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["stop_reason"], "turn_limit");
+    assert_eq!(report["turns_used"], 1);
+}

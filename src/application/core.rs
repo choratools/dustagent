@@ -57,6 +57,7 @@ pub struct DustCore<P: LlmProvider> {
     provider: P,
     mcp_clients: HashMap<String, Box<dyn McpClient>>,
     max_turns: usize,
+    wrap_up_on_limit: bool,
     timeout_ms: u64,
     tool_timeout_ms: u64,
     lifecycle_warnings: Vec<String>,
@@ -81,6 +82,7 @@ impl<P: LlmProvider> DustCore<P> {
     /// Creates a new `DustCore` instance with a loaded manifest and LLM provider.
     pub fn new(manifest: AppManifest, provider: P) -> Self {
         let max_turns = manifest.max_turns.unwrap_or(10);
+        let wrap_up_on_limit = manifest.wrap_up_on_limit.unwrap_or(false);
         let timeout_ms = manifest.timeout_ms.unwrap_or(300_000);
         let tool_timeout_ms = manifest.tool_timeout_ms.unwrap_or(30_000);
         // Built-in tools are always available under the `dustagent` namespace —
@@ -92,6 +94,7 @@ impl<P: LlmProvider> DustCore<P> {
             provider,
             mcp_clients,
             max_turns,
+            wrap_up_on_limit,
             timeout_ms,
             tool_timeout_ms,
             lifecycle_warnings: Vec::new(),
@@ -131,6 +134,12 @@ impl<P: LlmProvider> DustCore<P> {
     /// Sets the maximum conversation turns for tool calling loops (builder pattern).
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns;
+        self
+    }
+
+    /// Enables three extra turns to finalize work after the normal turn limit.
+    pub fn with_wrap_up_on_limit(mut self, enabled: bool) -> Self {
+        self.wrap_up_on_limit = enabled;
         self
     }
 
@@ -1495,11 +1504,35 @@ impl<P: LlmProvider> DustCore<P> {
         let mut compact_attempt = 0usize;
         let mut compact_retry_feedback = String::new();
         let mut compact_work: Option<super::compaction::SummaryWork> = None;
-        for additional_turn in 1..=self.max_turns {
+        let turn_budget = self
+            .max_turns
+            .saturating_add(if self.wrap_up_on_limit { 3 } else { 0 });
+        for additional_turn in 1..=turn_budget {
             let turn = prior_turns.saturating_add(additional_turn);
             if Instant::now() >= deadline {
                 report.stop_reason = StopReason::TimeLimit;
                 stop!(report, &messages);
+            }
+            if self.wrap_up_on_limit && additional_turn == self.max_turns.saturating_add(1) {
+                let notice = ChatMessage::user("[dustagent turn limit: wrap-up]
+The normal turn budget is exhausted. You have at most 3 additional turns, including this one, to finalize the current task. Use existing evidence, perform only essential remaining actions, and return the requested final response in the original required format. Clearly state any unfinished work or uncertainty; do not claim unverified completion. The original deadline and cancellation still apply.");
+                if let Err(error) = self.archive_message(&notice) {
+                    phase = CheckpointPhase::Blocked;
+                    report.error = Some(format!("Wrap-up notice could not be archived: {error}"));
+                    stop!(report, &messages);
+                }
+                // An in-progress staged compaction holds a snapshot of the
+                // retained suffix. Carry the new notice into that replacement too.
+                if let Some(work) = compact_work.as_mut() {
+                    work.plan.recent.push(notice.clone());
+                }
+                messages.push(notice);
+                report
+                    .warnings
+                    .push("Normal turn limit reached; granted 3 wrap-up turns".into());
+                if !self.persist(user_input, &messages, &mut report, phase, started, prior_ms) {
+                    return finish_with_prior(report, started, prior_ms);
+                }
             }
             let before = super::compaction::estimate(&messages, tools_bytes);
             if compact_config.enabled
@@ -1673,7 +1706,7 @@ impl<P: LlmProvider> DustCore<P> {
                     entry.elapsed_ms = attempt_started.elapsed().as_millis() as u64;
                     entry.error = Some(error.clone());
                     if compact_attempt <= compact_config.max_summary_retries {
-                        if additional_turn == self.max_turns {
+                        if additional_turn == turn_budget {
                             report.stop_reason = StopReason::TurnLimit;
                             stop!(report, &messages);
                         }
