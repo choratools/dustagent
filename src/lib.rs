@@ -35,6 +35,7 @@ pub use application::skills::SkillCatalog;
 pub use application::retry::RetryConfig;
 pub use application::state::WorkingState;
 pub use application::validation::{ValidationDecision, ValidationMode};
+pub use application::{OutputSchema, OutputType};
 
 pub use application::events::ExecutionEvent;
 pub use application::session::AgentSession;

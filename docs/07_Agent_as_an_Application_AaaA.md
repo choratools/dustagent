@@ -104,9 +104,20 @@ DustAgent는 시스템을 완전히 둘로 쪼갭니다:
       "args": ["mcp-server-fetch"]
     }
   },
-  "output_format": "raw_json"
+  "output_format": "raw_json",
+  "output_schema": {
+    "type": "object",
+    "required": ["title", "url"],
+    "additionalProperties": false,
+    "properties": {
+      "title": {"type": "string", "minLength": 1},
+      "url": {"type": "string", "pattern": "^https?://"}
+    }
+  }
 }
 ```
+
+`output_format`은 모델에 원하는 형식을 안내하고, `output_schema`는 최종 응답이 그 형식과 필드 조건을 만족하는지 실행 중 검사한다. 자세한 지원 제약과 수정 피드백 흐름은 [완료 피드백과 실행 복구](15_완료_피드백_및_실행_복구.md)를 참고한다.
 
 ### 실행 및 파이프라이닝
 ```bash

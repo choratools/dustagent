@@ -185,6 +185,10 @@ pub struct AppManifest {
     /// Exact actual model IDs; "*" is the optional fallback.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub model_configurations: HashMap<String, ModelConfiguration>,
+    /// Maximum retained and model-facing bytes per ordinary tool result (1..=1 MiB).
+    /// Omitted preserves the 64 KiB default; native history reads remain separately bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_output_max_bytes: Option<usize>,
     /// Context compaction policy; omitted uses conservative automatic defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<crate::application::compaction::CompactionConfig>,
@@ -215,15 +219,29 @@ pub struct AppManifest {
     /// Default LLM model identifier (e.g. "gpt-4o-mini", "claude-3-5-sonnet").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// App-local callable tools packaged under tools/.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tools: HashMap<String, crate::application::tools::AppToolConfig>,
     /// Scoped MCP servers attached to this application.
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// Preferred output format (e.g. "raw_json", "search_replace_patch").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_format: Option<String>,
+    /// Optional native contract for the final response. Invalid candidates are
+    /// sent back to the model as bounded feedback within the existing budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<crate::application::output_schema::OutputSchema>,
     /// Optional max conversation turns for tool calling loop (default: 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<usize>,
+    /// Grant three finalization turns after the normal turn budget (default: false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap_up_on_limit: Option<bool>,
+    /// Tell the model its remaining turns and time on every request. The notice is
+    /// appended to that request only; it is never stored in the conversation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub budget_notice: bool,
     /// Overall execution timeout in milliseconds (default: 300000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -261,7 +279,13 @@ impl AppManifest {
     pub fn from_json_str(content: &str) -> Result<Self> {
         let manifest: Self = serde_json::from_str(content)
             .map_err(|e| DustError::Manifest(format!("Failed to parse manifest JSON: {e}")))?;
+        if let Some(schema) = &manifest.output_schema {
+            schema
+                .validate()
+                .map_err(|error| DustError::Manifest(format!("Invalid output_schema: {error}")))?;
+        }
         manifest.validate_native_namespace()?;
+        crate::application::tools::validate_configs(&manifest.tools)?;
         manifest.validate_model_configurations()?;
         for config in manifest.mcp_servers.values() {
             config.validate_chroot()?;
@@ -277,6 +301,14 @@ impl AppManifest {
     }
 
     pub fn validate_model_configurations(&self) -> Result<()> {
+        if self
+            .tool_output_max_bytes
+            .is_some_and(|limit| !(1..=1_048_576).contains(&limit))
+        {
+            return Err(DustError::Manifest(
+                "tool_output_max_bytes must be 1..=1048576".into(),
+            ));
+        }
         if self.model_configurations.len() > 128 {
             return Err(DustError::Manifest(
                 "At most 128 model configurations are allowed".into(),
@@ -297,6 +329,11 @@ impl AppManifest {
 
     /// Native tool namespace cannot be replaced by a configured MCP server.
     pub fn validate_native_namespace(&self) -> Result<()> {
+        if self.mcp_servers.contains_key("app") {
+            return Err(DustError::Manifest(
+                "MCP namespace app is reserved for app-local tools".into(),
+            ));
+        }
         if self.mcp_servers.contains_key("dustagent") {
             return Err(DustError::Manifest(
                 "MCP namespace dustagent is reserved for native tools".into(),

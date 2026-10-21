@@ -46,12 +46,20 @@ fn model(summary: &str) -> Model {
         capacity: None,
     }
 }
+fn manifest_with_context(window: usize) -> AppManifest {
+    let mut manifest = AppManifest::new();
+    manifest.compaction = Some(CompactionConfig {
+        context_window_tokens: Some(window),
+        ..Default::default()
+    });
+    manifest
+}
 #[tokio::test]
 async fn oversized_unsummarizable_request_stops_before_provider_and_keeps_original() {
     let mut provider = model("unused");
     provider.capacity = Some(4096);
     let seen = provider.requests.clone();
-    let mut core = DustCore::new(AppManifest::new(), provider);
+    let mut core = DustCore::new(manifest_with_context(4096), provider);
     let input = "x".repeat(15_000);
     let report = core.execute_report(&input).await;
     assert_eq!(report.stop_reason, StopReason::ExecutionError);
@@ -132,7 +140,7 @@ async fn compaction_directory_is_cumulative_scoped_and_reopens_with_original_anc
         "Investigated authentication and cache behavior; consult originals for exact evidence.",
     );
     let seen = provider.requests.clone();
-    let mut core = DustCore::new(AppManifest::new(), provider);
+    let mut core = DustCore::new(manifest_with_context(32_768), provider);
     let mut session = AgentSession::new();
     core.prompt_report(&mut session, "Investigate src/auth.rs refresh_token 401")
         .await;
@@ -220,6 +228,7 @@ async fn tighter_budget_drops_recent_answer_and_keeps_directory_within_bounds() 
         let seen = provider.requests.clone();
         let mut manifest = AppManifest::new();
         manifest.compaction = Some(CompactionConfig {
+            context_window_tokens: Some(32_768),
             trigger_tokens: trigger,
             keep_recent_messages: 2,
             max_summary_bytes: 512,
@@ -263,10 +272,9 @@ async fn session_compact_preserves_originals_summary_and_followup_protocol() {
         "First answer and second answer were completed; retain exact originals when details matter.",
     );
     let seen = model.requests.clone();
-    let mut core = DustCore::new(
-        AppManifest::new().with_system_prompt("app instructions"),
-        model,
-    );
+    let mut manifest = manifest_with_context(32_768);
+    manifest.system_prompt = Some("app instructions".into());
+    let mut core = DustCore::new(manifest, model);
     let mut session = AgentSession::new();
     let first = core.prompt_report(&mut session, "first request").await;
     assert_eq!(first.stop_reason, StopReason::Completed);
@@ -323,7 +331,7 @@ async fn session_compact_preserves_originals_summary_and_followup_protocol() {
 async fn invalid_summary_keeps_original_archive_and_stops_before_task_request() {
     let model = model("");
     let seen = model.requests.clone();
-    let mut core = DustCore::new(AppManifest::new(), model);
+    let mut core = DustCore::new(manifest_with_context(32_768), model);
     let mut session = AgentSession::new();
     core.prompt_report(&mut session, "one").await;
     core.prompt_report(&mut session, "two").await;

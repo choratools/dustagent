@@ -87,6 +87,9 @@ struct AcpArgs {
     model: Option<String>,
     #[arg(long)]
     max_turns: Option<usize>,
+    /// Grant three wrap-up turns after the normal limit; use =false to disable
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    wrap_up_on_limit: Option<bool>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400_000))]
     timeout_ms: Option<u64>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86_400_000))]
@@ -185,6 +188,9 @@ struct RunArgs {
     /// Override maximum model turns
     #[arg(long)]
     max_turns: Option<usize>,
+    /// Grant three wrap-up turns after the normal limit; use =false to disable
+    #[arg(long, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
+    wrap_up_on_limit: Option<bool>,
 
     /// Input query, URL, or prompt (reads from STDIN if omitted)
     #[arg(trailing_var_arg = true)]
@@ -295,6 +301,7 @@ async fn main() -> ExitCode {
                 app: args.app,
                 model: args.model,
                 max_turns: args.max_turns,
+                wrap_up_on_limit: args.wrap_up_on_limit,
                 timeout_ms: args.timeout_ms,
                 tool_timeout_ms: args.tool_timeout_ms,
             };
@@ -665,6 +672,9 @@ async fn handle_run(args: RunArgs) -> anyhow::Result<u8> {
     }
     if let Some(turns) = args.max_turns {
         core = core.with_max_turns(turns);
+    }
+    if let Some(enabled) = args.wrap_up_on_limit {
+        core = core.with_wrap_up_on_limit(enabled);
     }
     let started = std::time::Instant::now();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);

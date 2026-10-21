@@ -1,0 +1,31 @@
+{
+  "name": "text-stats",
+  "description": "Count supplied text using an app-owned tool.",
+  "package": { "name": "text-stats", "version": "0.1.0" },
+  "skills": ["text-stats"],
+  "system_prompt": "Use your text-stats skill and app__text_stats to count the exact supplied text. Return the observed counts as JSON. Do not estimate counts.",
+  "mcp_servers": {},
+  "tools": {
+    "text_stats": {
+      "description": "Count characters, whitespace-separated words, and lines in supplied text.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "text": { "type": "string" } },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "command": "python3",
+      "entrypoint": "tools/text_stats.py"
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "characters": { "type": "integer", "minimum": 0 },
+      "words": { "type": "integer", "minimum": 0 },
+      "lines": { "type": "integer", "minimum": 0 }
+    },
+    "required": ["characters", "words", "lines"],
+    "additionalProperties": false
+  }
+}

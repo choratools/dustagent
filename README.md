@@ -8,7 +8,7 @@
 > 직접 `dust`를 쓰려고요? Agent한테 시키세요.
 > Let your agent create, run, and improve the agents it needs.
 
-DustAgent is a Rust runtime for **Agent as an Application (AaaA)**. Each application is a JSON manifest with a focused prompt and its own MCP servers. It accepts a task, calls an OpenAI-compatible model, runs tool calls when needed, and returns the result.
+DustAgent is a Rust runtime for **Agent as an Application (AaaA)**. Each application is a JSON manifest with a focused prompt, its own skills, and explicitly declared app tools or MCP servers. It accepts a task, calls an OpenAI-compatible model, runs tool calls when needed, and returns the result.
 
 Your coding agent or automation owns the larger task. DustAgent supplies focused workers: generate a commit message, extract data, diagnose an error, or produce a patch. With experience enabled, it also records runs, investigates relevant documentation, and selects examples to reuse.
 
@@ -240,13 +240,39 @@ dust install ./coverage-reader-0.1.0.dustpkg
 dust run coverage-reader "discovered=290 observed=100 distinct items"
 ```
 
-A package contains root `app.json`, its own `skills/`, and optional README/LICENSE files. The manifest declares `package: {"name":"coverage-reader","version":"0.1.0","dust_version":">=0.1.0"}` and `skills: ["coverage"]`. Each declared skill has YAML-frontmatter `SKILL.md` plus optional `references/`, `scripts/`, and `assets/`, following the [Agent Skills directory format](https://agentskills.io/specification). Names and descriptions are shown first; `dustagent__read_skill` loads instructions or UTF-8 resource files on demand. Undeclared skills, path traversal, and symlinks are rejected. Reads are limited to 64 KiB; binaries can be bundled but cannot be read through this text tool.
+A package contains root `app.json`, its own `skills/`, optional callable `tools/`, and optional README/LICENSE files. The manifest declares `package: {"name":"coverage-reader","version":"0.1.0","dust_version":">=0.1.0"}` and `skills: ["coverage"]`. Each declared skill has YAML-frontmatter `SKILL.md` plus optional `references/`, `scripts/`, and `assets/`, following the [Agent Skills directory format](https://agentskills.io/specification). Names and descriptions are shown first; `dustagent__read_skill` loads instructions or UTF-8 resource files on demand. Undeclared skills, path traversal, and symlinks are rejected. Reads are limited to 64 KiB; binaries can be bundled but cannot be read through this text tool.
 
 Plain `.dustpkg` files are bounded tar.gz archives with root contents. `pack --encrypt` encrypts the entire compressed archive with AES-256-GCM; Argon2id derives the key from the passphrase. Only package name and version remain visible in the encrypted file header. A wrong passphrase or modified ciphertext is rejected before extraction. Packing and installing validate declared skills and never run hooks or skill scripts. Existing destinations are not overwritten. Runtime compatibility accepts an exact `X.Y.Z` or `>=X.Y.Z`. The default store is `~/.dustagent/packages`; set `DUST_PACKAGE_HOME`, or use `install --store` with the same store when resolving installed names. Archive execution decrypts into a private temporary directory and removes it after the run. Package content hashes bind checkpoint resume across extraction locations.
 
 Encryption protects a package at rest and while it is distributed; it does not hide prompts from someone who has the passphrase and runs the app. Runtime memory, the model request, and Dust's normal execution history/checkpoints can contain decrypted prompt text. The passphrase is not recoverable, so keep a secure backup.
 
 Skill access restrictions apply to the native skill reader. Explicit MCP servers and checkers keep their declared capabilities; this is not a process sandbox. Their executables/dependencies must already be installed, and relative command/checker paths still resolve from the caller's working directory. `allowed-tools` metadata does not grant execution permissions. See [package and skill guide](docs/14_앱_패키지_및_스킬.md).
+
+### App-owned callable tools
+
+Declare callable tools in `app.json` alongside skills. Dust exposes only this app's declared tools as `app__<name>`; skills explain how to use them. No MCP server is started. Each invocation runs the declared interpreter with a packaged `tools/` entrypoint, sends validated JSON arguments on STDIN, and reads one JSON result from STDOUT.
+
+```json
+{
+  "tools": {
+    "text_stats": {
+      "description": "Count characters in supplied text",
+      "input_schema": {
+        "type": "object",
+        "properties": { "text": { "type": "string" } },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "command": "python3",
+      "entrypoint": "tools/text_stats.py"
+    }
+  }
+}
+```
+
+Tool source code is not automatically placed in the model prompt. The model receives the declared name, description, and input schema; an app-owned skill can explain when and how to call it. Tool registration is independent of skill preload settings. JSON input and STDOUT are each limited to 1 MiB, and STDERR to 64 KiB. Tools return one JSON value; the app’s `output_schema` validates the agent’s final response rather than individual tool results.
+
+The interpreter and dependencies must already be installed. Packing, installing, and loading skills do not execute tool code. Calls use the existing timeout, reporting, transcript, and checkpoint lifecycle; uncertain side effects require reconciliation and are never automatically replayed. Tool code uses the host user's permissions. See the [app tool guide](docs/22_앱_내장_도구.md) and [text-stats example](apps/text-stats/app.json).
 
 ### Model-specific skill loading
 
@@ -284,7 +310,7 @@ Dust keeps original messages and tool results in a private append-only JSONL arc
 {"compaction":{"enabled":true}}
 ```
 
-Defaults derive from the configured model's context capacity, reserving 10% each (at least 1,024 tokens) for output and tool growth. Codex uses its local `models_cache.json` capacity hint; the official OpenAI endpoint uses a small exact-ID capacity table. Unknown/custom deployments use a conservative 32,768-token fallback; set `context_window_tokens` to their actual deployment limit. Recent complete exchanges are selected by estimated token budget, and the summary allowance scales with that budget. `trigger_tokens`, `keep_recent_messages`, `max_summary_tokens`, and `max_summary_bytes` default to `0` (automatic); explicit overrides still work. The summary token cap defaults to one eighth of the trigger budget. Dust uses provider-reported output tokens when available; `max_summary_bytes` is a separate UTF-8 safety ceiling, not the summary's token budget. Normal turn records and compaction attempts retain provider usage, including input, output, and cached input tokens when the provider returns them. If usage is absent, Dust estimates summary tokens from UTF-8 length; pre-request context sizing also remains an approximate serialized-text estimate. Compaction adds a model call only at the threshold, uses the same time/turn budget, and installs a summary only after it is valid and reduces context. Empty, oversized, or unexpected tool-call summaries may retry twice by default (`max_summary_retries: 0..3`); every retry consumes a normal turn and the same deadline. Each attempt is retained in `compaction_attempts` with its turn, status, response bytes, summary token count and whether it was provider-reported or estimated, provider usage, both limits, elapsed time, and original record index, while `compactions` remains the list of successful compactions. Diagnostics remain readable even if an external runner removes its temporary archive. Set `enabled:false` to disable automatic summaries; original recording remains enabled. Output checkers keep the existing bounded tool-evidence report; full originals remain in the separate archive.
+The default context capacity is fixed at 256,000 tokens, reserving 10% each (at least 1,024 tokens) for output and tool growth. An app may still set `context_window_tokens` explicitly when a deployment has a smaller verified limit. Recent complete exchanges are selected by estimated token budget, and the summary allowance scales with that budget. `trigger_tokens`, `keep_recent_messages`, `max_summary_tokens`, and `max_summary_bytes` default to `0` (automatic); explicit overrides still work. The summary token cap defaults to one eighth of the trigger budget. Dust uses provider-reported output tokens when available; `max_summary_bytes` is a separate UTF-8 safety ceiling, not the summary's token budget. Normal turn records and compaction attempts retain provider usage, including input, output, and cached input tokens when the provider returns them. If usage is absent, Dust estimates summary tokens from UTF-8 length; pre-request context sizing also remains an approximate serialized-text estimate. Compaction adds a model call only at the threshold, uses the same time/turn budget, and installs a summary only after it is valid and reduces context. Empty, oversized, or unexpected tool-call summaries may retry twice by default (`max_summary_retries: 0..3`); every retry consumes a normal turn and the same deadline. Each attempt is retained in `compaction_attempts` with its turn, status, response bytes, summary token count and whether it was provider-reported or estimated, provider usage, both limits, elapsed time, and original record index, while `compactions` remains the list of successful compactions. Diagnostics remain readable even if an external runner removes its temporary archive. Set `enabled:false` to disable automatic summaries; original recording remains enabled. Output checkers keep the existing bounded tool-evidence report; full originals remain in the separate archive.
 
 An oversized completed latest tool batch can be summarized in full instead of forcing its retention. Dust keeps the largest recent complete suffix that fits; an explicit recent-message count caps the desired suffix and yields to hard bounds. If the summary request is too large, Dust processes contiguous UTF-8 chunks of the JSON reference source, carrying forward bounded, unverified continuation notes. Request estimates include JSON escaping, preserved instructions/requests, prior notes, retry feedback and output reserve. Every chunk and retry consumes a turn and the same deadline. Originals and complete active batches remain intact until all chunks succeed and the final replacement passes hard bounds. Intermediate valid notes appear as `accepted` attempts; only installed replacements appear in `compactions`. Checkpoints preserve originals and archived intermediate responses, and resume may restart summarization; the temporary chunk cursor is not persisted. This bounds requests without guaranteeing the model preserves every fact in its notes.
 
@@ -304,13 +330,13 @@ Reports distinguish final responses from tool observations. They contain `stop_r
 
 | Exit code | Stop reason | Meaning |
 | :--- | :--- | :--- |
-| `0` | `completed` | Nonempty final response; configured output checker passed, if present |
+| `0` | `completed` | Nonempty final response; configured `output_schema` and checker passed, if present |
 | `1` | CLI/setup error | Invalid input, configuration, or report-file I/O failure |
 | `2` | `turn_limit` | Model turn budget exhausted |
 | `3` | `time_limit` / `tool_timeout` | Overall or individual tool deadline exhausted |
 | `4` | `empty_response` | Model ended without nonempty final content |
 | `5` | `execution_error` | Execution failed, such as a provider request error |
-| `6` | `validation_failed` | Configured checker rejected the output |
+| `6` | `validation_failed` | A configured output schema or checker rejected the output |
 | `7` | `cancelled` | Library cancellation; ACP returns a cancelled prompt response without exiting the process |
 
 Without `--json`, only completed runs emit task output on STDOUT. With `--json`, failed runs also emit their report; callers must still inspect the exit code. `--report` saves the report atomically with owner-only permissions on Unix. Reports can include sensitive task and tool data.
@@ -335,6 +361,19 @@ Example:
 ```
 
 Defaults are ten model turns, five minutes overall, and thirty seconds per tool call. App fields `max_turns`, `timeout_ms`, and `tool_timeout_ms` set defaults; CLI options override them. Timeout values support 1–86400000 milliseconds. The CLI's overall deadline includes MCP startup, automatic experience review, tool discovery, model requests, and tool calls. Bounded cancellation cleanup can add up to one second and shutdown has a separate five-second budget. Synchronous input/report file I/O is outside the async deadline.
+
+Set `"wrap_up_on_limit": true` in the manifest or pass `--wrap-up-on-limit` to grant three additional turns after `max_turns` is exhausted. This is disabled by default. `--wrap-up-on-limit=false` overrides an enabled manifest setting. Both `dust run` and `dust acp` accept the option:
+
+```sh
+dust run crawler --max-turns 10 --wrap-up-on-limit "Collect the results"
+dust run crawler --wrap-up-on-limit=false "Use only the normal turn budget"
+dust acp crawler --max-turns 10 --wrap-up-on-limit
+```
+
+When the normal budget expires, Dust records a wrap-up notice in the conversation and transcript, asking the model to finalize within the next three turns and preserve the original output requirements. Tools and output validation remain available; normal early completion still ends immediately. Reports include the extra turns in `turns_used` and a warning when wrap-up starts. A model that continues using tools beyond all three extra turns still stops with `turn_limit`; granting the turns does not guarantee a final response. These are the existing execution-loop turns, so compaction and validation repair also consume them. Overall deadlines, cancellation, provider errors, and uncertain tool outcomes keep their existing behavior and do not trigger extra time or tool replay. Resume grants a fresh per-invocation budget, including wrap-up when enabled.
+
+Set `"budget_notice": true` in the manifest to tell the model where it stands. Each model request then ends with one operator message, for example `Model turn 4 of 10; 6 more after this one, about 52 of 60 minutes left`, followed by a hint to stop opening new lines of inquiry once a third of the turns remain, and an instruction to answer without tools on the final turn or when a tenth of the time is left. With `wrap_up_on_limit`, the last normal turn announces the wrap-up turns, and those turns read `Wrap-up turn 1 of 3`. The notice is appended to the request only: it is not stored in the conversation, checkpoint or transcript, and the cached prefix is unchanged. It is disabled by default and does not change any limit.
+
 
 Timed-out MCP clients are discarded to avoid consuming a late response as a later request's result. A timed-out remote operation can still have executed; the runtime does not automatically replay it. Recovered tool failures remain visible in the report and prevent admission as successful experience examples. Output-check failures also prevent admission.
 
@@ -425,7 +464,7 @@ No run IDs or individual approval commands are needed. The reinforcement flow is
 
 ```text
 Recorded input/output
-  → output-format check
+  → configured output schema check
   → configured local checker, if present
   → relevant documentation lookup
   → model review with the collected evidence
@@ -437,7 +476,7 @@ The CLI proposes up to two official documentation URLs per reviewed example and 
 
 Review processes at most ten pending completed examples per invocation. Selected examples are matched by word overlap; at most three examples and 8 KiB of their combined input/output enter the next task's context. The app prompt and tool declarations remain in place. Model weights are not changed.
 
-Recording is opt-in. Both `run` and `learn` accept `--experience-dir PATH`; on `run`, that option also enables experience. The default store is `~/.dustagent/experiences/`. Records are scoped by the full manifest: changing the prompt, tools, checker, or research settings starts a separate set of examples and preserves the old files.
+Recording is opt-in. Both `run` and `learn` accept `--experience-dir PATH`; on `run`, that option also enables experience. The default store is `~/.dustagent/experiences/`. Records are scoped by the full manifest: changing the prompt, tools, output schema, checker, or research settings starts a separate set of examples and preserves the old files.
 
 Records include task inputs and outputs. Review sends those records and collected evidence to the configured model API and can make additional HTTP requests. A selected example is useful reference material, not proof of correctness. Checker success establishes only what the checker tested; document excerpts establish only what was actually fetched.
 
@@ -475,6 +514,31 @@ dust learn checked_summary --list
 ```
 
 Its checker validates the JSON shape and summary length, not factual accuracy. See [the experience guide](docs/11_경험_기반_자기강화.md) for storage limits, source retrieval, and the library interfaces. [reinforcer](apps/reinforcer.json) exposes the review prompt as a separate app; the CLI connects the actual checks, retrieval, and persistence.
+
+### Require a JSON output shape
+
+For deterministic JSON requirements, declare `output_schema` in the app manifest. DustAgent includes the schema in the model instructions, parses the entire final response as JSON, and checks the declared constraints before marking the run complete:
+
+```json
+{
+  "output_format": "raw_json",
+  "output_schema": {
+    "type": "object",
+    "required": ["summary", "tags"],
+    "additionalProperties": false,
+    "properties": {
+      "summary": {"type": "string", "minLength": 1, "maxLength": 200},
+      "tags": {
+        "type": "array",
+        "minItems": 1,
+        "items": {"type": "string", "enum": ["rust", "agents", "tools"]}
+      }
+    }
+  }
+}
+```
+
+Invalid JSON, wrong types, missing required fields, and other violations become bounded feedback for the model. DustAgent keeps working within the same turn and time budgets; it does not add an unbounded retry loop. This built-in subset supports `type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, numeric bounds (`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`), string bounds and `pattern`, and array bounds. `pattern` uses Rust regular-expression syntax. Unsupported schema keywords are rejected when loading the manifest. An optional `validation` command runs after the built-in schema passes, so app-specific checks can verify additional conditions.
 
 ## App manifests and scoped tools
 

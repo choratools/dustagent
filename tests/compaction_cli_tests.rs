@@ -468,7 +468,7 @@ fn acp_history_is_session_scoped_and_cannot_read_a_caller_chosen_path() {
 }
 
 #[test]
-fn default_policy_handles_one_large_latest_tool_result_without_unsummarizable_failure() {
+fn default_256k_policy_bounds_a_tool_result_that_exceeds_message_limits() {
     let dir = tempfile::tempdir().unwrap();
     let app = app(dir.path(), true);
     let mut manifest: Value =
@@ -494,8 +494,77 @@ fn default_policy_handles_one_large_latest_tool_result_without_unsummarizable_fa
         .as_str()
         .unwrap();
     assert!(
-        feedback.len() < 20000,
-        "model-facing result is bounded while original remains full"
+        feedback.len() < 100000,
+        "model-facing result remains bounded while the original is archived"
     );
     assert!(feedback.contains("original record 4 is preserved"));
+}
+
+#[test]
+fn app_tool_output_limit_preserves_full_json_in_model_and_report() {
+    for configured in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(dir.path(), false);
+        if configured {
+            let mut manifest: Value =
+                serde_json::from_slice(&std::fs::read(&app).unwrap()).unwrap();
+            manifest["tool_output_max_bytes"] = json!(262_144);
+            std::fs::write(&app, manifest.to_string()).unwrap();
+        }
+        let (url, requests) = serve(vec![
+            call("large", "fixture__large", json!({})),
+            answer("done"),
+        ]);
+        let (report, success) = run(dir.path(), &app, &url, "retain full tool JSON");
+        assert!(success, "{report}");
+        let output = report["tool_calls"][0]["output"].as_str().unwrap();
+        let requests = requests.lock().unwrap();
+        let feedback = requests[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap();
+        if configured {
+            assert!(output.len() > 65_536);
+            assert_eq!(report["tool_calls"][0]["truncated"], false);
+            let parsed: Value = serde_json::from_str(output).expect("report retains complete JSON");
+            assert!(parsed.to_string().contains("ORIGINAL_BEYOND_64K"));
+            let parsed: Value =
+                serde_json::from_str(feedback).expect("model receives complete JSON");
+            assert!(parsed.to_string().contains("ORIGINAL_BEYOND_64K"));
+        } else {
+            assert_eq!(output.len(), 65_536);
+            assert_eq!(report["tool_calls"][0]["truncated"], true);
+            assert!(!feedback.contains("ORIGINAL_BEYOND_64K"));
+            assert!(feedback.contains("model-facing tool output truncated"));
+        }
+    }
+}
+
+#[test]
+fn app_tool_output_limit_is_opt_in_and_bounded() {
+    use dustagent::AppManifest;
+    assert_eq!(
+        AppManifest::from_json_str("{}")
+            .unwrap()
+            .tool_output_max_bytes,
+        None
+    );
+    for limit in [0, 1_048_577] {
+        assert!(
+            AppManifest::from_json_str(&json!({"tool_output_max_bytes":limit}).to_string())
+                .is_err()
+        );
+    }
+    for limit in [1, 65_536, 1_048_576] {
+        assert_eq!(
+            AppManifest::from_json_str(&json!({"tool_output_max_bytes":limit}).to_string())
+                .unwrap()
+                .tool_output_max_bytes,
+            Some(limit)
+        );
+    }
 }

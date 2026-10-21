@@ -292,3 +292,43 @@ async fn small_context_keeps_summary_and_directory_allowance_within_actual_hard_
     assert_originals(&report, &seed.messages);
     cleanup(&report);
 }
+
+#[tokio::test]
+async fn wrap_up_notice_survives_compaction_already_in_progress() {
+    let (mut baseline, seed, _, _dir) = fixture(32, None, false);
+    let baseline_report = baseline.resume_report(&seed).await;
+    assert_eq!(baseline_report.stop_reason, StopReason::Completed);
+    let normal_turns = baseline_report.compaction_attempts.len() - 1;
+    assert!(normal_turns > 0);
+    cleanup(&baseline_report);
+
+    let (core, seed, requests, _dir) = fixture(normal_turns, None, false);
+    let mut core = core.with_wrap_up_on_limit(true);
+    let report = core.resume_report(&seed).await;
+    assert_eq!(
+        report.stop_reason,
+        StopReason::Completed,
+        "{:?}",
+        report.error
+    );
+    assert!(report.turns_used > normal_turns);
+    assert!(report.turns_used <= normal_turns + 3);
+    let captured = requests.lock().unwrap();
+    let request = captured.last().unwrap();
+    assert_eq!(
+        request
+            .iter()
+            .filter(|m| m
+                .content
+                .as_deref()
+                .is_some_and(|s| s.starts_with("[dustagent turn limit: wrap-up]")))
+            .count(),
+        1
+    );
+    assert!(
+        request
+            .iter()
+            .any(|m| m.content.as_deref() == Some("original current request"))
+    );
+    cleanup(&report);
+}
