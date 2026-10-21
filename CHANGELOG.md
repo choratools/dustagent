@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add the `budget_notice` manifest option. Every model request ends with an operator message giving the turn and time left, a nudge to stop exploring when a third of the turns remain, and a request to answer without tools on the final turn or when a tenth of the time is left. It is aware of `wrap_up_on_limit` turns, is not stored in the conversation, and is off by default.
+
 ## 2.0.0 — 2026-10-18
 
 - Bundle app-local callable tools under `tools/` alongside private skills. Models call declared `app__<name>` tools with schema-validated JSON input and receive one JSON result; no MCP server is required. Source directories, installed apps, plain archives, and encrypted packages use the same runtime.

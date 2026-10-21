@@ -238,6 +238,10 @@ pub struct AppManifest {
     /// Grant three finalization turns after the normal turn budget (default: false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrap_up_on_limit: Option<bool>,
+    /// Tell the model its remaining turns and time on every request. The notice is
+    /// appended to that request only; it is never stored in the conversation.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub budget_notice: bool,
     /// Overall execution timeout in milliseconds (default: 300000).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
