@@ -1873,12 +1873,27 @@ The normal turn budget is exhausted. You have at most 3 additional turns, includ
                 provider_diagnostics: None,
             };
             let mut retry_index = 0;
+            let budgeted;
+            let request: &[ChatMessage] = if self.manifest.budget_notice {
+                let mut with_notice = messages.clone();
+                with_notice.push(ChatMessage::user(budget_notice(
+                    additional_turn,
+                    self.max_turns,
+                    turn_budget - self.max_turns,
+                    deadline.saturating_duration_since(Instant::now()),
+                    Duration::from_millis(self.timeout_ms),
+                )));
+                budgeted = with_notice;
+                &budgeted
+            } else {
+                &messages
+            };
             let completion = loop {
                 match wait_until(
                     deadline,
                     self.cancellation.clone(),
                     self.provider.chat_with_usage(
-                        &messages,
+                        request,
                         if tools.is_empty() { None } else { Some(&tools) },
                     ),
                 )
@@ -2611,4 +2626,94 @@ async fn cancelled(cancellation: Option<tokio::sync::watch::Receiver<bool>>) {
         }
     }
     std::future::pending::<()>().await;
+}
+
+/// Operator notice appended to one model request when `budget_notice` is on.
+/// `turn` counts from 1 within this invocation (a resumed run gets its own budget);
+/// turns past `max_turns` are the `wrap_up_turns` granted by `wrap_up_on_limit`.
+/// On the last turn, or with a tenth of the time left, it asks for the answer without tools.
+fn budget_notice(
+    turn: usize,
+    max_turns: usize,
+    wrap_up_turns: usize,
+    time_left: Duration,
+    time_total: Duration,
+) -> String {
+    let minutes_left = time_left.as_secs().div_ceil(60);
+    let minutes_total = time_total.as_secs().div_ceil(60);
+    let mut notice = if turn <= max_turns {
+        let wrap_up = if wrap_up_turns > 0 {
+            format!(", then up to {wrap_up_turns} wrap-up turns")
+        } else {
+            String::new()
+        };
+        format!(
+            "[Run budget: operator notice, not part of the task] Model turn {turn} of {max_turns}; \
+             {} more after this one{wrap_up}, about {minutes_left} of {minutes_total} minutes left. \
+             One turn may call several tools at once: batch independent reads and queries.",
+            max_turns - turn
+        )
+    } else {
+        format!(
+            "[Run budget: operator notice, not part of the task] Wrap-up turn {} of {wrap_up_turns}, \
+             about {minutes_left} of {minutes_total} minutes left.",
+            turn - max_turns
+        )
+    };
+    if turn >= max_turns + wrap_up_turns || time_left.as_secs() * 10 <= time_total.as_secs() {
+        notice.push_str(
+            " This is your final turn: do not call tools. Return the final answer now in the \
+             required output format from what you have established, and list what you could \
+             not verify in its limitations.",
+        );
+    } else if turn > max_turns {
+        notice.push_str(" Do only what is essential, then return the final answer.");
+    } else if (max_turns - turn) * 3 <= max_turns {
+        notice.push_str(
+            " Stop opening new lines of inquiry: use the remaining turns to confirm your \
+             strongest findings.",
+        );
+    }
+    notice
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn budget_notice_counts_down_and_closes_on_the_last_turn() {
+        let total = Duration::from_secs(3600);
+        let first = budget_notice(1, 10, 0, Duration::from_secs(3600), total);
+        assert!(
+            first
+                .contains("Model turn 1 of 10; 9 more after this one, about 60 of 60 minutes left")
+        );
+        assert!(!first.contains("final turn") && !first.contains("Stop opening"));
+        let late = budget_notice(7, 10, 0, Duration::from_secs(1800), total);
+        assert!(late.contains("3 more after this one") && late.contains("Stop opening new lines"));
+        let last = budget_notice(10, 10, 0, Duration::from_secs(1200), total);
+        assert!(last.contains("final turn: do not call tools"));
+        let out_of_time = budget_notice(2, 10, 0, Duration::from_secs(300), total);
+        assert!(out_of_time.contains("final turn: do not call tools"));
+    }
+
+    #[test]
+    fn budget_notice_follows_the_wrap_up_turns() {
+        let total = Duration::from_secs(3600);
+        let normal_last = budget_notice(10, 10, 3, Duration::from_secs(1800), total);
+        assert!(normal_last.contains("0 more after this one, then up to 3 wrap-up turns"));
+        assert!(!normal_last.contains("final turn"));
+        let first_wrap = budget_notice(11, 10, 3, Duration::from_secs(1700), total);
+        assert!(
+            first_wrap.contains("Wrap-up turn 1 of 3")
+                && first_wrap.contains("only what is essential")
+        );
+        assert!(!first_wrap.contains("final turn"));
+        let last_wrap = budget_notice(13, 10, 3, Duration::from_secs(1600), total);
+        assert!(
+            last_wrap.contains("Wrap-up turn 3 of 3")
+                && last_wrap.contains("final turn: do not call tools")
+        );
+    }
 }
